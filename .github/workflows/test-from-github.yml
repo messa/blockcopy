@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  deploy:
+  test:
 
     runs-on: ubuntu-latest
 
@@ -27,3 +27,14 @@ jobs:
     - name: Run --help
       run: |
         blockcopy --help
+
+    - name: Run end-to-end test
+      run: |
+        dd if=/dev/urandom bs=1M count=32 of=test_src
+        dd if=/dev/urandom bs=1M count=32 of=test_dst
+        sha1sum test_src | tee test_src.sha1
+        blockcopy checksum test_dst | \
+          blockcopy retrieve test_src | \
+          blockcopy save test_dst
+        cmp test_src test_dst
+        sha1sum -c test_src.sha1
