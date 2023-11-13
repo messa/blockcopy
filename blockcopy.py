@@ -1,5 +1,38 @@
 #!/usr/bin/env python3
 
+r'''
+Copy large files (or block devices) effeciently over network.
+
+The idea is to split the file into blocks, calculate hash of each block and send
+the hashes to the source side. The source side will compare the hashes with the
+hashes of the blocks it has and sends only the blocks that are different to the
+destination side.
+
+Communication over network is not implemented here. This script uses stdin/stdout
+for communication. You have to run this scripts multiple times and connect their
+stdout/stdin via pipe. You can use ssh or netcat to send data over network.
+
+Usage - run on the destination side:
+
+    blockcopy.py checksum /dev/destination | \
+    ssh srchost blockcopy.py retrieve /dev/source | \
+    blockcopy.py save /dev/destination
+
+Or run on the source side:
+
+    ssh dsthost blockcopy.py checksum /dev/destination | \
+    blockcopy.py retrieve /dev/source | \
+    ssh dsthost blockcopy.py save /dev/destination
+
+You can plug in compression:
+
+    ssh dsthost blockcopy.py checksum /dev/destination | \
+    blockcopy.py retrieve /dev/source | pzstd | \
+    ssh dsthost 'zstdcat | blockcopy.py save /dev/destination'
+
+See also readme: https://github.com/messa/blockcopy
+'''
+
 from argparse import ArgumentParser
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
@@ -169,7 +202,8 @@ def do_checksum(file, hash_output_stream):
 def do_retrieve(file, hash_input_stream, block_output_stream):
     '''
     Read the file in blocks, calculate hash of each block, read hash from
-    input stream and if those hashes differ, write data to the output stream.
+    hash_input_stream and if those hashes differ, write the block to
+    block_output_stream.
 
     The output stream is a binary stream of the following format:
 
@@ -278,6 +312,9 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
 
 
 def do_save(file, block_input_stream):
+    '''
+    Read blocks from block_input_stream and write them to the file.
+    '''
     with open(file, 'r+b') as f:
         while True:
             command = block_input_stream.read(4)
