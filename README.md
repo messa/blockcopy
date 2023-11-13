@@ -10,6 +10,10 @@ Uses threadpool for computing hashes so that copy speed is not limited by CPU.
 Installation
 ------------
 
+You can just [download](https://raw.githubusercontent.com/messa/blockcopy/main/blockcopy.py) the file `blockcopy.py` to `/usr/local/bin` and run it.
+
+Or you can install this package unsing `pip install` and then run the script as `blockcopy`:
+
 ```shell
 python3 -m pip install https://github.com/messa/blockcopy/archive/refs/heads/main.zip
 ```
