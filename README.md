@@ -7,6 +7,14 @@ Designed for copying from/to NVMe disks over gigabit network.
 Uses threadpool for computing hashes so that copy speed is not limited by CPU.
 
 
+Installation
+------------
+
+```shell
+python3 -m pip install https://github.com/messa/blockcopy/archive/refs/heads/main.zip
+```
+
+
 Usage
 -----
 
