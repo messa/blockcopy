@@ -34,7 +34,6 @@ See also readme: https://github.com/messa/blockcopy
 '''
 
 from argparse import ArgumentParser
-from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from logging import getLogger
