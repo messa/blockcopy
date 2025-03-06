@@ -37,7 +37,7 @@ def test_copy(tmp_path, script_path):
     assert dst_path.read_bytes() == test_content
 
 
-def test_copy_to_larger_device(tmp_path, script_path):
+def test_copy_to_larger_file(tmp_path, script_path):
     '''
     This tests simulates copying from smaller to larger device or file.
     Contents of the destination file is replaced with the source file contents.
@@ -93,5 +93,33 @@ def test_copy_identical(tmp_path, script_path):
 
         # retrieve output should be trivial
         assert p2_output == b'done'
+
+    assert dst_path.read_bytes() == test_content
+
+
+def test_copy_to_smaller_file(tmp_path, script_path):
+    '''
+    This tests simulates copying from larger source file to smaller destination file.
+    This could happend for example when previous copy was interrupted.
+    It is expected that the destination file will become equal to the source file,
+    including extending the destination file size.
+    '''
+    test_content = b'Test content.' * 1024000
+    src_path = tmp_path / 'src_file'
+    src_path.write_bytes(test_content)
+    dst_path = tmp_path / 'dst_file'
+    dst_path.write_bytes(b'-' * (len(test_content) // 2))
+
+    cmd1 = [script_path, 'checksum', str(dst_path)]
+    cmd2 = [script_path, 'retrieve', str(src_path)]
+    cmd3 = [script_path, 'save', str(dst_path)]
+
+    with ExitStack() as stack:
+        p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
+        p2 = stack.enter_context(Popen(cmd2, stdin=p1.stdout, stdout=PIPE))
+        p3 = stack.enter_context(Popen(cmd3, stdin=p2.stdout))
+        assert p1.wait() == 0
+        assert p2.wait() == 0
+        assert p3.wait() == 0
 
     assert dst_path.read_bytes() == test_content
