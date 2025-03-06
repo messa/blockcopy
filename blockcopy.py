@@ -40,7 +40,7 @@ from logging import getLogger
 import os
 from queue import Queue
 import sys
-from threading import Event
+from threading import Event, Lock
 
 
 logger = getLogger(__name__)
@@ -124,6 +124,7 @@ def do_checksum(file, hash_output_stream):
     - 4 bytes: command "done"
     '''
     with ThreadPoolExecutor(worker_count + 2) as executor:
+        hash_output_stream_lock = Lock()
         block_queue = Queue(worker_count * 3)
         send_queue = Queue(worker_count * 3)
 
@@ -179,10 +180,11 @@ def do_checksum(file, hash_output_stream):
                     hash_result_event, hash_result_container = task
                     hash_result_event.wait()
                     hash_results, = hash_result_container
-                    for block_data_length, block_hash in hash_results:
-                        hash_output_stream.write(b'hash')
-                        hash_output_stream.write(block_data_length.to_bytes(4, 'big'))
-                        hash_output_stream.write(block_hash)
+                    with hash_output_stream_lock:
+                        for block_data_length, block_hash in hash_results:
+                            hash_output_stream.write(b'hash')
+                            hash_output_stream.write(block_data_length.to_bytes(4, 'big'))
+                            hash_output_stream.write(block_hash)
                 finally:
                     send_queue.task_done()
 
@@ -194,8 +196,9 @@ def do_checksum(file, hash_output_stream):
         for f in futures:
             f.result()
 
-    hash_output_stream.write(b'done')
-    hash_output_stream.flush()
+    with hash_output_stream_lock:
+        hash_output_stream.write(b'done')
+        hash_output_stream.flush()
 
 
 def do_retrieve(file, hash_input_stream, block_output_stream):
@@ -218,6 +221,7 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
     - 4 bytes: command "done"
     '''
     with ThreadPoolExecutor(worker_count + 2) as executor:
+        block_output_stream_lock = Lock()
         hash_queue = Queue(worker_count * 3)
         send_queue = Queue(worker_count * 3)
 
@@ -290,11 +294,12 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                     hash_result_event, hash_result_container = task
                     hash_result_event.wait()
                     to_send, = hash_result_container
-                    for block_pos, block_data in to_send:
-                        block_output_stream.write(b'data')
-                        block_output_stream.write(block_pos.to_bytes(8, 'big'))
-                        block_output_stream.write(len(block_data).to_bytes(4, 'big'))
-                        block_output_stream.write(block_data)
+                    with block_output_stream_lock:
+                        for block_pos, block_data in to_send:
+                            block_output_stream.write(b'data')
+                            block_output_stream.write(block_pos.to_bytes(8, 'big'))
+                            block_output_stream.write(len(block_data).to_bytes(4, 'big'))
+                            block_output_stream.write(block_data)
                 finally:
                     send_queue.task_done()
 
@@ -306,8 +311,9 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
         for f in futures:
             f.result()
 
-    block_output_stream.write(b'done')
-    block_output_stream.flush()
+    with block_output_stream_lock:
+        block_output_stream.write(b'done')
+        block_output_stream.flush()
 
 
 def do_save(file, block_input_stream):
