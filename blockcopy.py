@@ -38,6 +38,7 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from logging import getLogger
 import os
+from pathlib import Path
 from queue import Queue
 import sys
 from threading import Event, Lock
@@ -127,12 +128,16 @@ def do_checksum(file, hash_output_stream):
         hash_output_stream_lock = Lock()
         block_queue = Queue(worker_count * 3)
         send_queue = Queue(worker_count * 3)
+        source_end_offset = None
 
         def read_worker():
             # Only one will run
+            nonlocal source_end_offset
+
             with open(file, 'rb') as f:
                 while True:
                     block_data_batch = []
+
                     for _ in range(16):
                         block_data = f.read(block_size)
                         if not block_data:
@@ -146,6 +151,10 @@ def do_checksum(file, hash_output_stream):
                     hash_result_container = []
                     block_queue.put((block_data_batch, hash_result_event, hash_result_container))
                     send_queue.put((hash_result_event, hash_result_container))
+
+                    del block_data_batch
+
+                source_end_offset = f.tell()
 
             for _ in range(worker_count):
                 block_queue.put(None)
@@ -197,6 +206,13 @@ def do_checksum(file, hash_output_stream):
             f.result()
 
     with hash_output_stream_lock:
+        if Path(file).is_file():
+            # Instruct the retrieve process to send data afther the last hashed block.
+            # This is necessary when the destination file is smaller than the source file
+            # and we want to copy the whole source file.
+            hash_output_stream.write(b'rest')
+            hash_output_stream.write(source_end_offset.to_bytes(8, 'big'))
+
         hash_output_stream.write(b'done')
         hash_output_stream.flush()
 
@@ -228,11 +244,24 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
         def read_worker():
             # Only one will run
             with open(file, 'rb') as f:
-                batch = []
+                hash_batch = []
+
+                def flush_hash_batch():
+                    nonlocal hash_batch
+                    if hash_batch:
+                        hash_result_event = Event()
+                        hash_result_container = []
+                        hash_queue.put((hash_batch, hash_result_event, hash_result_container))
+                        send_queue.put((hash_result_event, hash_result_container))
+                        hash_batch = []
+
                 while True:
                     command = hash_input_stream.read(4)
+                    logger.debug('Processing command: %r', command)
+
                     if command == b'done':
                         break
+
                     elif command == b'hash':
                         block_size_b = hash_input_stream.read(4)
                         destination_hash = hash_input_stream.read(hash_digest_size)
@@ -242,23 +271,44 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                         block_data = f.read(block_size)
                         assert block_data
 
-                        batch.append((destination_hash, block_pos, block_data))
+                        hash_batch.append((destination_hash, block_pos, block_data))
 
-                        if len(batch) >= 16:
+                        if len(hash_batch) >= 16:
+                            flush_hash_batch()
+
+                    elif command == b'rest':
+                        # Just read the rest of the file.
+                        # No hashing - there is nothing to compare with.
+                        # We will send all the data to the destination.
+
+                        offset_b = hash_input_stream.read(8)
+                        offset = int.from_bytes(offset_b, 'big')
+                        f.seek(offset)
+                        assert f.tell() == offset
+                        # logger.debug('Sending the rest of the file from offset %d', offset)
+
+                        while True:
+                            block_batch = []
+
+                            for _ in range(16):
+                                block_pos = f.tell()
+                                block_data = f.read(block_size)
+                                if not block_data:
+                                    break
+                                block_batch.append((block_pos, block_data))
+
+                            if not block_batch:
+                                break
+
                             hash_result_event = Event()
-                            hash_result_container = []
-                            hash_queue.put((batch, hash_result_event, hash_result_container))
-                            send_queue.put((hash_result_event, hash_result_container))
-                            batch = []
+                            hash_result_event.set()
+                            send_queue.put((hash_result_event, [block_batch]))
+                            del block_batch
+
                     else:
                         raise Exception(f'Unknown command received: {command!r}')
 
-                if batch:
-                    hash_result_event = Event()
-                    hash_result_container = []
-                    hash_queue.put((batch, hash_result_event, hash_result_container))
-                    send_queue.put((hash_result_event, hash_result_container))
-                    del batch
+                flush_hash_batch()
 
             for _ in range(worker_count):
                 hash_queue.put(None)
