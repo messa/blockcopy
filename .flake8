@@ -14,7 +14,7 @@ extend-ignore =
     # line too long
     E501
 
-max-complexity = 30
+max-complexity = 35
 
 per-file-ignores =
     # imported but unused

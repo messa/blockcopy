@@ -63,7 +63,11 @@ def main():
     p_save = subparsers.add_parser('save')
 
     p_checksum.add_argument('file')
+    p_checksum.add_argument('--start', type=int, default=0)
+    p_checksum.add_argument('--end', type=int, default=None)
+
     p_retrieve.add_argument('file')
+
     p_save.add_argument('file')
 
     args = parser.parse_args()
@@ -74,7 +78,7 @@ def main():
     ctrl_c_will_terminate_immediately()
 
     if args.command == 'checksum':
-        do_checksum(args.file, sys.stdout.buffer)
+        do_checksum(args.file, sys.stdout.buffer, args.start, args.end)
     elif args.command == 'retrieve':
         do_retrieve(args.file, sys.stdin.buffer, sys.stdout.buffer)
     elif args.command == 'save':
@@ -109,7 +113,7 @@ def ctrl_c_will_terminate_immediately():
     signal(SIGTERM, lambda *args: os.kill(os.getpid(), SIGKILL))
 
 
-def do_checksum(file, hash_output_stream):
+def do_checksum(file, hash_output_stream, start_offset, end_offset):
     '''
     Read the file in blocks, calculate hash of each block and write the hashes to the output stream.
 
@@ -135,14 +139,24 @@ def do_checksum(file, hash_output_stream):
             nonlocal source_end_offset
 
             with open(file, 'rb') as f:
+                f.seek(start_offset)
+
                 while True:
                     block_data_batch = []
 
                     for _ in range(16):
-                        block_data = f.read(block_size)
+                        block_pos = f.tell()
+
+                        if end_offset is None:
+                            block_data = f.read(block_size)
+                        elif block_pos >= end_offset:
+                            break
+                        else:
+                            block_data = f.read(min(block_size, end_offset - block_pos))
+
                         if not block_data:
                             break
-                        block_data_batch.append(block_data)
+                        block_data_batch.append((block_pos, block_data))
 
                     if not block_data_batch:
                         break
@@ -169,8 +183,9 @@ def do_checksum(file, hash_output_stream):
                         break
                     block_data_batch, hash_result_event, hash_result_container = task
                     hash_results = []
-                    for block_data in block_data_batch:
+                    for block_pos, block_data in block_data_batch:
                         hash_results.append((
+                            block_pos,
                             len(block_data),
                             hash_factory(block_data).digest(),
                         ))
@@ -190,8 +205,9 @@ def do_checksum(file, hash_output_stream):
                     hash_result_event.wait()
                     hash_results, = hash_result_container
                     with hash_output_stream_lock:
-                        for block_data_length, block_hash in hash_results:
-                            hash_output_stream.write(b'hash')
+                        for block_pos, block_data_length, block_hash in hash_results:
+                            hash_output_stream.write(b'Hash')
+                            hash_output_stream.write(block_pos.to_bytes(8, 'big'))
                             hash_output_stream.write(block_data_length.to_bytes(4, 'big'))
                             hash_output_stream.write(block_hash)
                 finally:
@@ -263,6 +279,9 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                         break
 
                     elif command == b'hash':
+                        # This is the deprecated version of the hash commmand - does not contain
+                        # block position.
+
                         block_size_b = hash_input_stream.read(4)
                         destination_hash = hash_input_stream.read(hash_digest_size)
                         block_size = int.from_bytes(block_size_b, 'big')
@@ -272,6 +291,33 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                         assert block_data
 
                         hash_batch.append((destination_hash, block_pos, block_data))
+
+                        if len(hash_batch) >= 16:
+                            flush_hash_batch()
+
+                    elif command == b'Hash':
+                        block_pos_b = hash_input_stream.read(8)
+                        block_size_b = hash_input_stream.read(4)
+                        destination_hash = hash_input_stream.read(hash_digest_size)
+                        block_pos = int.from_bytes(block_pos_b, 'big')
+                        block_size = int.from_bytes(block_size_b, 'big')
+                        assert len(destination_hash) == hash_digest_size
+                        if f.tell() != block_pos:
+                            logger.debug('Seeking to %d', block_pos)
+                            f.seek(block_pos)
+                            assert f.tell() == block_pos
+                        block_data = f.read(block_size)
+
+                        if len(block_data) == block_size:
+                            hash_batch.append((destination_hash, block_pos, block_data))
+                        elif block_data:
+                            # Probable just at end of source file while the destination file is larger.
+                            # Let's send whatever we have read.
+                            hash_batch.append((None, block_pos, block_data))
+                        else:
+                            # Beyond end of source file while the destination file is larger.
+                            # Nothing to send.
+                            pass
 
                         if len(hash_batch) >= 16:
                             flush_hash_batch()
