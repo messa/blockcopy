@@ -46,7 +46,5 @@ def test_checksum_devstdin(tmp_path, script_path, terminate_process):
             b'\x00\x00\x00\x00\x00\x00\x00\x00', # block pos
             b'\x00\x00\x00\x0c', # block data length
             sha3_512(test_content).digest(), # block hash
-            b'rest',
-            b'\x00\x00\x00\x00\x00\x00\x00\x0c', # size of the sample file
             b'done',
         ])

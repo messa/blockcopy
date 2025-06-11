@@ -54,6 +54,26 @@ assert hash_digest_size == 512 / 8
 worker_count = min(os.cpu_count(), 8)
 
 
+class IncompleteReadError(Exception):
+    '''
+    Exception raised when reading from a stream is incomplete.
+    '''
+    pass
+
+
+class CollectedExceptions(Exception):
+    '''
+    Exception that contains multiple exceptions.
+    '''
+
+    def __init__(self, exceptions):
+        self.exceptions = exceptions
+        super().__init__('Collected exceptions: ' + ', '.join(repr(e) for e in exceptions))
+
+    def __repr__(self):
+        return f'{self.__class__.__name__}({self.exceptions!r})'
+
+
 class ExceptionCollector:
     '''
     Collects exceptions from worker threads and allows the main thread to check
@@ -61,25 +81,23 @@ class ExceptionCollector:
     '''
     def __init__(self):
         self._lock = Lock()
-        self._exception = None
-        self._exception_event = Event()
+        self._exceptions = []
 
     def collect_exception(self, exc):
         '''Store exception from worker thread'''
         with self._lock:
-            if self._exception is None:  # Store only the first exception
-                self._exception = exc
-                self._exception_event.set()
+            self._exceptions.append(exc)
 
     def check_and_raise(self):
         '''Check if any exception was collected and re-raise it'''
         with self._lock:
-            if self._exception is not None:
-                raise self._exception
+            if self._exceptions:
+                raise CollectedExceptions(self._exceptions)
 
     def has_exception(self):
         '''Check if any exception was collected'''
-        return self._exception_event.is_set()
+        with self._lock:
+            return bool(self._exceptions)
 
 
 def main():
@@ -117,15 +135,18 @@ def main():
             raise Exception(f'Not implemented: {args.command}')
 
         logger.debug('Done')
+    except CollectedExceptions as exc:
+        logger.error('Failed: %r', args.command, exc)
+        sys.exit(f'ERROR ({args.command}): {exc}')
     except Exception as exc:
-        logger.exception('FAILED: %s: %r', args.command, exc)
-        sys.exit(1)
+        logger.exception('Failed: %r', args.command, exc)
+        sys.exit(f'ERROR ({args.command}): {exc}')
 
 
 def setup_logging(verbose):
     from logging import basicConfig, DEBUG, INFO
     basicConfig(
-        format='%(asctime)s [%(process)d] %(name)s %(levelname)5s: %(message)s',
+        format='%(asctime)s [%(process)d %(threadName)s] %(name)s %(levelname)5s: %(message)s',
         level=DEBUG if verbose else INFO)
 
 
@@ -161,19 +182,28 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
     - ...
     - 4 bytes: command "done"
     '''
-    with ThreadPoolExecutor(worker_count + 2) as executor:
+    if hash_output_stream.isatty():
+        sys.exit('ERROR (checksum): hash_output_stream is a tty - will not write binary data to terminal')
+
+    with ThreadPoolExecutor(worker_count + 2, thread_name_prefix='checksum') as executor:
         hash_output_stream_lock = Lock()
         block_queue = Queue(worker_count * 3)
         send_queue = Queue(worker_count * 3)
         source_end_offset = None
         exception_collector = ExceptionCollector()
+        current_offset = None
 
         def read_worker():
             # Only one will run
             nonlocal source_end_offset
             try:
                 with open(file, 'rb') as f:
-                    f.seek(start_offset)
+                    if start_offset:
+                        f.seek(start_offset)
+                        block_pos = f.tell()
+                        assert block_pos == start_offset
+                    else:
+                        block_pos = 0
 
                     while True:
                         if exception_collector.has_exception():
@@ -185,7 +215,14 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
                             if exception_collector.has_exception():
                                 break
 
-                            block_pos = f.tell()
+                            try:
+                                current_pos = f.tell()
+                            except OSError:
+                                # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
+                                pass
+                            else:
+                                assert block_pos == current_pos
+                                del current_pos
 
                             if end_offset is None:
                                 block_data = f.read(block_size)
@@ -198,6 +235,8 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
                                 break
                             block_data_batch.append((block_pos, block_data))
 
+                            block_pos += len(block_data)
+
                         if not block_data_batch:
                             break
 
@@ -208,9 +247,19 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
 
                         del block_data_batch
 
-                    source_end_offset = f.tell()
+                    try:
+                        source_end_offset = f.tell()
+                    except OSError:
+                        # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
+                        source_end_offset = None
 
+            except BaseException as exc:
+                # not sure what the exception could be, but let's log it and re-raise it
+                logger.exception('do_checksum read_worker failed (BaseException): %r', exc)
+                exception_collector.collect_exception(exc)
+                raise exc
             except Exception as exc:
+                logger.exception('do_checksum read_worker failed: %r', exc)
                 exception_collector.collect_exception(exc)
             finally:
                 for _ in range(worker_count):
@@ -221,13 +270,16 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
             # Will run in multiple threads
             try:
                 while True:
-                    if exception_collector.has_exception():
-                        break
 
                     task = block_queue.get()
                     try:
                         if task is None:
                             break
+
+                        if exception_collector.has_exception():
+                            # just consume all tasks
+                            continue
+
                         block_data_batch, hash_result_event, hash_result_container = task
                         hash_results = []
                         for block_pos, block_data in block_data_batch:
@@ -249,13 +301,15 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
             # Only one will run
             try:
                 while True:
-                    if exception_collector.has_exception():
-                        break
-
                     task = send_queue.get()
                     try:
                         if task is None:
                             break
+
+                        if exception_collector.has_exception():
+                            # just consume all tasks
+                            continue
+
                         hash_result_event, hash_result_container = task
                         hash_result_event.wait()
                         hash_results, = hash_result_container
@@ -269,7 +323,13 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
                                 hash_output_stream.write(block_hash)
                     finally:
                         send_queue.task_done()
+            except BaseException as exc:
+                # not sure what the exception could be, but let's log it and re-raise it
+                logger.exception('do_checksum send_worker failed (BaseException): %r', exc)
+                exception_collector.collect_exception(exc)
+                raise exc
             except Exception as exc:
+                logger.exception('do_checksum send_worker failed: %r', exc)
                 exception_collector.collect_exception(exc)
 
         futures = [
@@ -280,8 +340,11 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
         for f in futures:
             f.result()
 
+    # no threads should be running any more at this point
+    exception_collector.check_and_raise()
+
     with hash_output_stream_lock:
-        if Path(file).is_file():
+        if source_end_offset is not None:
             # Instruct the retrieve process to send data afther the last hashed block.
             # This is necessary when the destination file is smaller than the source file
             # and we want to copy the whole source file.
@@ -290,8 +353,6 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
 
         hash_output_stream.write(b'done')
         hash_output_stream.flush()
-
-    exception_collector.check_and_raise()
 
 
 def do_retrieve(file, hash_input_stream, block_output_stream):
@@ -313,14 +374,20 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
     - ...
     - 4 bytes: command "done"
     '''
-    with ThreadPoolExecutor(worker_count + 2) as executor:
+    if block_output_stream.isatty():
+        sys.exit('ERROR (retrieve): block_output_stream is a tty - will not write binary data to terminal')
+
+    with ThreadPoolExecutor(worker_count + 2, thread_name_prefix='retrieve') as executor:
         block_output_stream_lock = Lock()
         hash_queue = Queue(worker_count * 3)
         send_queue = Queue(worker_count * 3)
         exception_collector = ExceptionCollector()
+        received_done = False
+        encountered_incomplete_read = None
 
         def read_worker():
             # Only one will run
+            nonlocal received_done, encountered_incomplete_read
             try:
                 with open(file, 'rb') as f:
                     hash_batch = []
@@ -339,9 +406,20 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                             break
 
                         command = hash_input_stream.read(4)
+
+                        if not command:
+                            flush_hash_batch()
+                            raise IncompleteReadError('The hash input stream was closed unexpectedly without receiving the `done` command')
+
+                        if len(command) != 4:
+                            flush_hash_batch()
+                            raise IncompleteReadError('Incomplete read of command from hash input stream')
+
                         logger.debug('Processing command: %r', command)
 
                         if command == b'done':
+                            received_done = True
+                            flush_hash_batch()
                             break
 
                         elif command == b'hash':
@@ -350,6 +428,8 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
 
                             block_size_b = hash_input_stream.read(4)
                             destination_hash = hash_input_stream.read(hash_digest_size)
+                            if len(block_size_b) != 4 or len(destination_hash) != hash_digest_size:
+                                raise IncompleteReadError('Incomplete read of hash from hash input stream')
                             block_size = int.from_bytes(block_size_b, 'big')
                             assert len(destination_hash) == hash_digest_size
                             block_pos = f.tell()
@@ -365,6 +445,8 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                             block_pos_b = hash_input_stream.read(8)
                             block_size_b = hash_input_stream.read(4)
                             destination_hash = hash_input_stream.read(hash_digest_size)
+                            if len(block_pos_b) != 8 or len(block_size_b) != 4 or len(destination_hash) != hash_digest_size:
+                                raise IncompleteReadError('Incomplete read of hash from hash input stream')
                             block_pos = int.from_bytes(block_pos_b, 'big')
                             block_size = int.from_bytes(block_size_b, 'big')
                             assert len(destination_hash) == hash_digest_size
@@ -394,6 +476,8 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                             # We will send all the data to the destination.
 
                             offset_b = hash_input_stream.read(8)
+                            if len(offset_b) != 8:
+                                raise IncompleteReadError('Incomplete read of offset from hash input stream')
                             offset = int.from_bytes(offset_b, 'big')
                             f.seek(offset)
                             assert f.tell() == offset
@@ -425,9 +509,20 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                         else:
                             raise Exception(f'Unknown command received: {command!r}')
 
-                    flush_hash_batch()
+                    assert not hash_batch
 
+            except IncompleteReadError as exc:
+                logger.exception('do_retrieve read_worker encountered incomplete read: %s', exc)
+                # Do not trigger the exception collector - it would make other threads terminate.
+                # But do set some flag that the whole workflow is not running successfully.
+                encountered_incomplete_read = exc
+            except BaseException as exc:
+                # not sure what the exception could be, but let's log it and re-raise it
+                logger.exception('do_retrieve read_worker failed (BaseException): %r', exc)
+                exception_collector.collect_exception(exc)
+                raise exc
             except Exception as exc:
+                logger.exception('do_retrieve read_worker failed: %r', exc)
                 exception_collector.collect_exception(exc)
             finally:
                 for _ in range(worker_count):
@@ -438,41 +533,54 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
             # Will run in multiple threads
             try:
                 while True:
-                    if exception_collector.has_exception():
-                        break
-
                     task = hash_queue.get()
                     try:
                         if task is None:
                             break
-                        batch, hash_result_event, hash_result_container = task
 
-                        to_send = []
-                        for destination_hash, block_pos, block_data in batch:
-                            if exception_collector.has_exception():
-                                break
-                            block_hash = hash_factory(block_data).digest()
-                            if block_hash != destination_hash:
-                                to_send.append((block_pos, block_data))
+                        try:
+                            batch, hash_result_event, hash_result_container = task
 
-                        hash_result_container.append(to_send)
-                        hash_result_event.set()
+                            to_send = []
+                            for destination_hash, block_pos, block_data in batch:
+                                if exception_collector.has_exception():
+                                    # Just consume all work, do nothing
+                                    break
+                                block_hash = hash_factory(block_data).digest()
+                                if block_hash != destination_hash:
+                                    to_send.append((block_pos, block_data))
+
+                            hash_result_container.append(to_send)
+                            hash_result_event.set()
+                        except Exception as exc:
+                            # Should not happen.
+                            # If this happens, the send_worker thread could block on hash_result_event.wait().
+                            logger.exception('do_retrieve hash_worker failed to process task: %r', exc)
+                            exception_collector.collect_exception(exc)
                     finally:
                         hash_queue.task_done()
+            except BaseException as exc:
+                # not sure what the exception could be, but let's log it and re-raise it
+                logger.exception('do_retrieve hash_worker failed (BaseException): %r', exc)
+                exception_collector.collect_exception(exc)
+                raise exc
             except Exception as exc:
+                logger.exception('do_retrieve hash_worker failed: %r', exc)
                 exception_collector.collect_exception(exc)
 
         def send_worker():
             # Only one will run
             try:
                 while True:
-                    if exception_collector.has_exception():
-                        break
-
                     task = send_queue.get()
                     try:
                         if task is None:
                             break
+
+                        if exception_collector.has_exception():
+                            # just consume all tasks
+                            continue
+
                         hash_result_event, hash_result_container = task
                         hash_result_event.wait()
                         to_send, = hash_result_container
@@ -484,9 +592,16 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                                 block_output_stream.write(block_pos.to_bytes(8, 'big'))
                                 block_output_stream.write(len(block_data).to_bytes(4, 'big'))
                                 block_output_stream.write(block_data)
+                            block_output_stream.flush()
                     finally:
                         send_queue.task_done()
+            except BaseException as exc:
+                # not sure what the exception could be, but let's log it and re-raise it
+                logger.exception('do_retrieve send_worker failed (BaseException): %r', exc)
+                exception_collector.collect_exception(exc)
+                raise exc
             except Exception as exc:
+                logger.exception('do_retrieve send_worker failed: %r', exc)
                 exception_collector.collect_exception(exc)
 
         futures = [
@@ -497,35 +612,57 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
         for f in futures:
             f.result()
 
+    # no threads should be running any more at this point
+    exception_collector.check_and_raise()
+
+    if encountered_incomplete_read:
+        sys.exit(f'ERROR (retrieve): {encountered_incomplete_read}')
+
+    if not received_done:
+        # This should not happen, becase that should already trigger the incomplete read exception.
+        sys.exit('ERROR (retrieve): Received no done command from the checksum side')
+
     with block_output_stream_lock:
         block_output_stream.write(b'done')
         block_output_stream.flush()
-
-    exception_collector.check_and_raise()
 
 
 def do_save(file, block_input_stream):
     '''
     Read blocks from block_input_stream and write them to the file.
     '''
-    with open(file, 'r+b') as f:
-        while True:
-            command = block_input_stream.read(4)
-            if not command:
-                break
-            if command == b'done':
-                break
-            elif command == b'data':
-                block_pos_b = block_input_stream.read(8)
-                block_size_b = block_input_stream.read(4)
-                block_pos = int.from_bytes(block_pos_b, 'big')
-                block_size = int.from_bytes(block_size_b, 'big')
-                block_data = block_input_stream.read(block_size)
-                assert len(block_data) == block_size
-                f.seek(block_pos)
-                f.write(block_data)
-            else:
-                raise Exception(f'Unknown command received: {command!r}')
+    try:
+        received_done = False
+        with open(file, 'r+b') as f:
+            while True:
+                command = block_input_stream.read(4)
+                if not command:
+                    raise IncompleteReadError('The block input stream was closed unexpectedly without receiving the `done` command')
+                if len(command) != 4:
+                    raise IncompleteReadError('Incomplete read of command from block input stream')
+                if command == b'done':
+                    received_done = True
+                    break
+                elif command == b'data':
+                    block_pos_b = block_input_stream.read(8)
+                    block_size_b = block_input_stream.read(4)
+                    if len(block_pos_b) != 8 or len(block_size_b) != 4:
+                        raise IncompleteReadError('Incomplete read of block position and size from block input stream')
+                    block_pos = int.from_bytes(block_pos_b, 'big')
+                    block_size = int.from_bytes(block_size_b, 'big')
+                    block_data = block_input_stream.read(block_size)
+                    if len(block_data) != block_size:
+                        raise IncompleteReadError('Incomplete read of block data from block input stream')
+                    f.seek(block_pos)
+                    f.write(block_data)
+                else:
+                    raise Exception(f'Unknown command received: {command!r}')
+
+        if not received_done:
+            # Should not happen - should already trigger the incomplete read exception.
+            sys.exit('ERROR (save): Received no done command from the retrieve side')
+    except IncompleteReadError as exc:
+        sys.exit(f'ERROR (save): {exc}')
 
 
 if __name__ == "__main__":
