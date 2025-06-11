@@ -1,13 +1,6 @@
 from contextlib import ExitStack
-from pathlib import Path
-from pytest import fixture
 import subprocess
 from subprocess import Popen, PIPE, DEVNULL
-
-
-@fixture
-def script_path():
-    return Path(__file__).resolve().parent.parent / 'blockcopy.py'
 
 
 def test_help(script_path):
