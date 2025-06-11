@@ -42,6 +42,7 @@ import os
 from queue import Queue
 import sys
 from threading import Event, Lock
+from time import monotonic
 
 
 logger = getLogger(__name__)
@@ -108,13 +109,14 @@ def main():
     p_retrieve = subparsers.add_parser('retrieve')
     p_save = subparsers.add_parser('save')
 
-    p_checksum.add_argument('file')
-    p_checksum.add_argument('--start', type=int, default=0)
-    p_checksum.add_argument('--end', type=int, default=None)
+    p_checksum.add_argument('destination_file')
+    p_checksum.add_argument('--progress', action='store_true', help='show progress info')
+    p_checksum.add_argument('--start', type=int, metavar='OFFSET', default=0)
+    p_checksum.add_argument('--end', type=int, metavar='OFFSET', default=None)
 
-    p_retrieve.add_argument('file')
+    p_retrieve.add_argument('source_file')
 
-    p_save.add_argument('file')
+    p_save.add_argument('destination_file')
 
     args = parser.parse_args()
 
@@ -125,11 +127,11 @@ def main():
 
     try:
         if args.command == 'checksum':
-            do_checksum(args.file, sys.stdout.buffer, args.start, args.end)
+            do_checksum(args.destination_file, sys.stdout.buffer, args.start, args.end, args.progress)
         elif args.command == 'retrieve':
-            do_retrieve(args.file, sys.stdin.buffer, sys.stdout.buffer)
+            do_retrieve(args.source_file, sys.stdin.buffer, sys.stdout.buffer)
         elif args.command == 'save':
-            do_save(args.file, sys.stdin.buffer)
+            do_save(args.destination_file, sys.stdin.buffer)
         else:
             raise Exception(f'Not implemented: {args.command}')
 
@@ -166,7 +168,7 @@ def ctrl_c_will_terminate_immediately():
     signal(SIGTERM, lambda *args: os.kill(os.getpid(), SIGKILL))
 
 
-def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
+def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_progress):
     '''
     Read the file in blocks, calculate hash of each block and write the hashes to the output stream.
 
@@ -183,6 +185,11 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
     '''
     if hash_output_stream.isatty():
         sys.exit('ERROR (checksum): hash_output_stream is a tty - will not write binary data to terminal')
+    start_offset = start_offset or 0
+    if end_offset is not None:
+        assert start_offset < end_offset
+
+    checksum_start_time = monotonic()
 
     with ThreadPoolExecutor(worker_count + 2, thread_name_prefix='checksum') as executor:
         hash_output_stream_lock = Lock()
@@ -193,7 +200,10 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
 
         def read_worker():
             # Only one will run
-            nonlocal source_end_offset
+            nonlocal source_end_offset, show_progress
+            show_progress_total_size = None
+            show_progress_last_output_time = monotonic()
+            show_progress_last_output_pct = 0
             try:
                 with ExitStack() as stack:
                     if file_path == '-':
@@ -201,17 +211,25 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
                     else:
                         f = stack.enter_context(open(file_path, 'rb'))
 
+                    if show_progress:
+                        if end_offset is None:
+                            try:
+                                assert f.tell() == 0
+                                show_progress_total_size = f.seek(0, os.SEEK_END)
+                                f.seek(0)
+                            except OSError:
+                                # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
+                                show_progress = False
+                        else:
+                            show_progress_total_size = end_offset - start_offset
+
                     if start_offset:
-                        f.seek(start_offset)
-                        block_pos = f.tell()
+                        block_pos = f.seek(start_offset)
                         assert block_pos == start_offset
                     else:
                         block_pos = 0
 
                     while True:
-                        if exception_collector.has_exception():
-                            break
-
                         block_data_batch = []
 
                         for _ in range(16):
@@ -240,7 +258,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
 
                             block_pos += len(block_data)
 
-                        if not block_data_batch:
+                        if not block_data_batch or exception_collector.has_exception():
                             break
 
                         hash_result_event = Event()
@@ -250,11 +268,29 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
 
                         del block_data_batch
 
-                    try:
-                        source_end_offset = f.tell()
-                    except OSError:
-                        # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
-                        source_end_offset = None
+                        if show_progress:
+                            show_progress_pct = 100 * (block_pos - start_offset) / show_progress_total_size
+                            if monotonic() - show_progress_last_output_time >= 60 or show_progress_pct - show_progress_last_output_pct >= 5:
+                                show_progress_last_output_time = monotonic()
+                                show_progress_last_output_pct = show_progress_pct
+                                print(
+                                    f'Checksum progress: {block_pos/2**30:7.2f} GB / {show_progress_total_size/2**30:.2f} GB'
+                                    f' ({show_progress_pct:5.2f}%)',
+                                    file=sys.stderr,
+                                    flush=True)
+
+                    if end_offset is None:
+                        try:
+                            # Mark where we have ended reading the destination file checksum.
+                            # The retrieve side then has chance to read and send anything from the source beyond this offset.
+                            source_end_offset = f.tell()
+                        except OSError:
+                            # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
+                            source_end_offset = None
+                    elif end_offset > block_pos:
+                        raise Exception('You have specified an --end offset, but the destination file (which we are checksumming now) is smaller than that')
+                    else:
+                        assert end_offset == block_pos
 
             except Exception as exc:
                 logger.exception('do_checksum read_worker failed: %r', exc)
@@ -349,13 +385,17 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
     with hash_output_stream_lock:
         if source_end_offset is not None:
             # Instruct the retrieve process to send data afther the last hashed block.
-            # This is necessary when the destination file is smaller than the source file
-            # and we want to copy the whole source file.
+            # This is necessary when the destination file (which are we checksumming now)
+            # is smaller than the source file and we want to copy the whole source file.
             hash_output_stream.write(b'rest')
             hash_output_stream.write(source_end_offset.to_bytes(8, 'big'))
 
         hash_output_stream.write(b'done')
         hash_output_stream.flush()
+
+    if show_progress:
+        checksum_duration = monotonic() - checksum_start_time
+        print(f'Checksum done in {checksum_duration:.3f} seconds', file=sys.stderr, flush=True)
 
 
 def do_retrieve(file_path, hash_input_stream, block_output_stream):

@@ -14,7 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    
+
     - name: Set up Python
       uses: actions/setup-python@v3
       with:
@@ -23,7 +23,7 @@ jobs:
     - name: Install package from Github
       run: |
         python -m pip install https://github.com/messa/blockcopy/archive/refs/heads/main.zip
-        
+
     - name: Run --help
       run: |
         blockcopy --help
@@ -33,7 +33,7 @@ jobs:
         dd if=/dev/urandom bs=1M count=32 of=test_src
         dd if=/dev/urandom bs=1M count=32 of=test_dst
         sha1sum test_src | tee test_src.sha1
-        blockcopy checksum test_dst | \
+        blockcopy checksum --progress test_dst | \
           blockcopy retrieve test_src | \
           blockcopy save test_dst
         cmp test_src test_dst
