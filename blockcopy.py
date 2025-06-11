@@ -35,6 +35,7 @@ See also readme: https://github.com/messa/blockcopy
 
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import ExitStack
 import hashlib
 from logging import getLogger
 import os
@@ -165,7 +166,7 @@ def ctrl_c_will_terminate_immediately():
     signal(SIGTERM, lambda *args: os.kill(os.getpid(), SIGKILL))
 
 
-def do_checksum(file, hash_output_stream, start_offset, end_offset):
+def do_checksum(file_path, hash_output_stream, start_offset, end_offset):
     '''
     Read the file in blocks, calculate hash of each block and write the hashes to the output stream.
 
@@ -194,7 +195,12 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
             # Only one will run
             nonlocal source_end_offset
             try:
-                with open(file, 'rb') as f:
+                with ExitStack() as stack:
+                    if file_path == '-':
+                        f = sys.stdin.buffer
+                    else:
+                        f = stack.enter_context(open(file_path, 'rb'))
+
                     if start_offset:
                         f.seek(start_offset)
                         block_pos = f.tell()
@@ -352,7 +358,7 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
         hash_output_stream.flush()
 
 
-def do_retrieve(file, hash_input_stream, block_output_stream):
+def do_retrieve(file_path, hash_input_stream, block_output_stream):
     '''
     Read the file in blocks, calculate hash of each block, read hash from
     hash_input_stream and if those hashes differ, write the block to
@@ -371,6 +377,9 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
     - ...
     - 4 bytes: command "done"
     '''
+    if file_path == '-':
+        sys.exit('ERROR (retrieve): file_path must be actual file or device, not `-`')
+
     if block_output_stream.isatty():
         sys.exit('ERROR (retrieve): block_output_stream is a tty - will not write binary data to terminal')
 
@@ -386,7 +395,7 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
             # Only one will run
             nonlocal received_done, encountered_incomplete_read
             try:
-                with open(file, 'rb') as f:
+                with open(file_path, 'rb') as f:
                     hash_batch = []
 
                     def flush_hash_batch():
@@ -624,13 +633,16 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
         block_output_stream.flush()
 
 
-def do_save(file, block_input_stream):
+def do_save(file_path, block_input_stream):
     '''
     Read blocks from block_input_stream and write them to the file.
     '''
+    if file_path == '-':
+        sys.exit('ERROR (save): file_path must be actual file or device, not `-`')
+
     try:
         received_done = False
-        with open(file, 'r+b') as f:
+        with open(file_path, 'r+b') as f:
             while True:
                 command = block_input_stream.read(4)
                 if not command:
