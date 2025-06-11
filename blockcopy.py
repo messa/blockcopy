@@ -38,11 +38,9 @@ from concurrent.futures import ThreadPoolExecutor
 import hashlib
 from logging import getLogger
 import os
-from pathlib import Path
 from queue import Queue
 import sys
 from threading import Event, Lock
-import traceback
 
 
 logger = getLogger(__name__)
@@ -191,7 +189,6 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
         send_queue = Queue(worker_count * 3)
         source_end_offset = None
         exception_collector = ExceptionCollector()
-        current_offset = None
 
         def read_worker():
             # Only one will run

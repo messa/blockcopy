@@ -47,6 +47,7 @@ def test_copy_tiny(tmp_path, script_path):
 
     assert dst_path.read_bytes() == test_content
 
+
 def test_copy_tiny_incomplete_hash_stream(tmp_path, script_path):
     test_content = b'Hello World!'
     src_path = tmp_path / 'src_file'
