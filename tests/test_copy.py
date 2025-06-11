@@ -55,14 +55,13 @@ def test_copy_tiny_incomplete_hash_stream(tmp_path, script_path):
     dst_path = tmp_path / 'dst_file'
     dst_path.write_bytes(b'-' * len(test_content))
 
-    cmd1 = [executable, script_path, '-v', 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, '-v', 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, '-v', 'save', str(dst_path)]
+    cmd1 = [executable, script_path, 'checksum', str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
+    cmd3 = [executable, script_path, 'save', str(dst_path)]
 
     with ExitStack() as stack:
-        print('Running: ', cmd1)
-        p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
-        p1_output = p1.stdout.read()
+        p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
+        p1_output, _ = p1.communicate(timeout=5)
         assert p1.wait() == 0
         assert p1_output == (
             b'Hash'
@@ -77,14 +76,12 @@ def test_copy_tiny_incomplete_hash_stream(tmp_path, script_path):
         # remove the `done` command
         p1_output = p1_output[:-4]
 
-        print('Running: ', cmd2)
-        p2 = stack.enter_context(Popen(cmd2, stdin=PIPE, stdout=PIPE))
+        p2 = stack.enter_context(Popen(cmd2, stdin=PIPE, stdout=PIPE, stderr=PIPE))
         p2_output, _ = p2.communicate(input=p1_output, timeout=5)
         assert p2.wait() == 1
         assert p2_output == b'data\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0cHello World!'
 
-        print('Running: ', cmd3)
-        p3 = stack.enter_context(Popen(cmd3, stdin=PIPE, stdout=PIPE))
+        p3 = stack.enter_context(Popen(cmd3, stdin=PIPE, stdout=PIPE, stderr=PIPE))
         p3_output, _ = p3.communicate(input=p2_output, timeout=5)
         assert p3.wait() == 1
         assert p3_output == b''

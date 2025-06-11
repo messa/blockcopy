@@ -134,10 +134,10 @@ def main():
 
         logger.debug('Done')
     except CollectedExceptions as exc:
-        logger.error('Failed: %r', args.command, exc)
+        logger.error('Failed: %r', exc)
         sys.exit(f'ERROR ({args.command}): {exc}')
     except Exception as exc:
-        logger.exception('Failed: %r', args.command, exc)
+        logger.exception('Failed: %r', exc)
         sys.exit(f'ERROR ({args.command}): {exc}')
 
 
@@ -250,14 +250,14 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
                         # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
                         source_end_offset = None
 
+            except Exception as exc:
+                logger.exception('do_checksum read_worker failed: %r', exc)
+                exception_collector.collect_exception(exc)
             except BaseException as exc:
                 # not sure what the exception could be, but let's log it and re-raise it
                 logger.exception('do_checksum read_worker failed (BaseException): %r', exc)
                 exception_collector.collect_exception(exc)
                 raise exc
-            except Exception as exc:
-                logger.exception('do_checksum read_worker failed: %r', exc)
-                exception_collector.collect_exception(exc)
             finally:
                 for _ in range(worker_count):
                     block_queue.put(None)
@@ -320,14 +320,14 @@ def do_checksum(file, hash_output_stream, start_offset, end_offset):
                                 hash_output_stream.write(block_hash)
                     finally:
                         send_queue.task_done()
+            except Exception as exc:
+                logger.exception('do_checksum send_worker failed: %r', exc)
+                exception_collector.collect_exception(exc)
             except BaseException as exc:
                 # not sure what the exception could be, but let's log it and re-raise it
                 logger.exception('do_checksum send_worker failed (BaseException): %r', exc)
                 exception_collector.collect_exception(exc)
                 raise exc
-            except Exception as exc:
-                logger.exception('do_checksum send_worker failed: %r', exc)
-                exception_collector.collect_exception(exc)
 
         futures = [
             executor.submit(read_worker),
@@ -513,14 +513,14 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                 # Do not trigger the exception collector - it would make other threads terminate.
                 # But do set some flag that the whole workflow is not running successfully.
                 encountered_incomplete_read = exc
+            except Exception as exc:
+                logger.exception('do_retrieve read_worker failed: %r', exc)
+                exception_collector.collect_exception(exc)
             except BaseException as exc:
                 # not sure what the exception could be, but let's log it and re-raise it
                 logger.exception('do_retrieve read_worker failed (BaseException): %r', exc)
                 exception_collector.collect_exception(exc)
                 raise exc
-            except Exception as exc:
-                logger.exception('do_retrieve read_worker failed: %r', exc)
-                exception_collector.collect_exception(exc)
             finally:
                 for _ in range(worker_count):
                     hash_queue.put(None)
@@ -592,14 +592,14 @@ def do_retrieve(file, hash_input_stream, block_output_stream):
                             block_output_stream.flush()
                     finally:
                         send_queue.task_done()
+            except Exception as exc:
+                logger.exception('do_retrieve send_worker failed: %r', exc)
+                exception_collector.collect_exception(exc)
             except BaseException as exc:
                 # not sure what the exception could be, but let's log it and re-raise it
                 logger.exception('do_retrieve send_worker failed (BaseException): %r', exc)
                 exception_collector.collect_exception(exc)
                 raise exc
-            except Exception as exc:
-                logger.exception('do_retrieve send_worker failed: %r', exc)
-                exception_collector.collect_exception(exc)
 
         futures = [
             executor.submit(read_worker),
