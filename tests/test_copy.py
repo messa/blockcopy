@@ -96,10 +96,11 @@ def test_copy(tmp_path, script_path):
     src_path.write_bytes(test_content)
     dst_path = tmp_path / 'dst_file'
     dst_path.write_bytes(b'-' * len(test_content))
+    assert dst_path.read_bytes() != test_content
 
-    cmd1 = [script_path, 'checksum', str(dst_path)]
-    cmd2 = [script_path, 'retrieve', str(src_path)]
-    cmd3 = [script_path, 'save', str(dst_path)]
+    cmd1 = [executable, script_path, 'checksum', str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
+    cmd3 = [executable, script_path, 'save', str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -109,6 +110,31 @@ def test_copy(tmp_path, script_path):
         assert p2.wait() == 0
         assert p3.wait() == 0
 
+    assert src_path.read_bytes() == test_content
+    assert dst_path.read_bytes() == test_content
+
+
+def test_copy_lzma(tmp_path, script_path):
+    test_content = b'Test content.' * 1024000
+    src_path = tmp_path / 'src_file'
+    src_path.write_bytes(test_content)
+    dst_path = tmp_path / 'dst_file'
+    dst_path.write_bytes(b'-' * len(test_content))
+    assert dst_path.read_bytes() != test_content
+
+    cmd1 = [executable, script_path, 'checksum', str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', '--lzma', str(src_path)]
+    cmd3 = [executable, script_path, 'save', str(dst_path)]
+
+    with ExitStack() as stack:
+        p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
+        p2 = stack.enter_context(Popen(cmd2, stdin=p1.stdout, stdout=PIPE))
+        p3 = stack.enter_context(Popen(cmd3, stdin=p2.stdout))
+        assert p1.wait() == 0
+        assert p2.wait() == 0
+        assert p3.wait() == 0
+
+    assert src_path.read_bytes() == test_content
     assert dst_path.read_bytes() == test_content
 
 
@@ -190,9 +216,9 @@ def test_copy_identical(tmp_path, script_path):
     dst_path = tmp_path / 'dst_file'
     dst_path.write_bytes(test_content)
 
-    cmd1 = [script_path, 'checksum', str(dst_path)]
-    cmd2 = [script_path, 'retrieve', str(src_path)]
-    cmd3 = [script_path, 'save', str(dst_path)]
+    cmd1 = [executable, script_path, 'checksum', str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
+    cmd3 = [executable, script_path, 'save', str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))

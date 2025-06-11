@@ -115,6 +115,7 @@ def main():
     p_checksum.add_argument('--end', type=int, metavar='OFFSET', default=None)
 
     p_retrieve.add_argument('source_file')
+    p_retrieve.add_argument('--lzma', action='store_true', help='use lzma compression')
 
     p_save.add_argument('destination_file')
 
@@ -127,9 +128,9 @@ def main():
 
     try:
         if args.command == 'checksum':
-            do_checksum(args.destination_file, sys.stdout.buffer, args.start, args.end, args.progress)
+            do_checksum(args.destination_file, sys.stdout.buffer, start_offset=args.start, end_offset=args.end, show_progress=args.progress)
         elif args.command == 'retrieve':
-            do_retrieve(args.source_file, sys.stdin.buffer, sys.stdout.buffer)
+            do_retrieve(args.source_file, sys.stdin.buffer, sys.stdout.buffer, use_lzma=args.lzma)
         elif args.command == 'save':
             do_save(args.destination_file, sys.stdin.buffer)
         else:
@@ -398,7 +399,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
         print(f'Checksum done in {checksum_duration:.3f} seconds', file=sys.stderr, flush=True)
 
 
-def do_retrieve(file_path, hash_input_stream, block_output_stream):
+def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
     '''
     Read the file in blocks, calculate hash of each block, read hash from
     hash_input_stream and if those hashes differ, write the block to
@@ -417,6 +418,9 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream):
     - ...
     - 4 bytes: command "done"
     '''
+    if use_lzma:
+        from lzma import compress as lzma_compress
+
     if file_path == '-':
         sys.exit('ERROR (retrieve): file_path must be actual file or device, not `-`')
 
@@ -542,7 +546,7 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream):
                                     block_data = f.read(block_size)
                                     if not block_data:
                                         break
-                                    block_batch.append((block_pos, block_data))
+                                    block_batch.append((block_pos, b'data', block_data))
 
                                 if not block_batch:
                                     break
@@ -594,7 +598,14 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream):
                                     break
                                 block_hash = hash_factory(block_data).digest()
                                 if block_hash != destination_hash:
-                                    to_send.append((block_pos, block_data))
+                                    if use_lzma:
+                                        block_data_lzma = lzma_compress(block_data)
+                                        if len(block_data_lzma) < len(block_data):
+                                            to_send.append((block_pos, b'dlzm', block_data_lzma))
+                                        else:
+                                            to_send.append((block_pos, b'data', block_data))
+                                    else:
+                                        to_send.append((block_pos, b'data', block_data))
 
                             hash_result_container.append(to_send)
                             hash_result_event.set()
@@ -631,10 +642,15 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream):
                         hash_result_event.wait()
                         to_send, = hash_result_container
                         with block_output_stream_lock:
-                            for block_pos, block_data in to_send:
+                            for block_pos, block_command, block_data in to_send:
                                 if exception_collector.has_exception():
                                     break
-                                block_output_stream.write(b'data')
+                                if block_command == b'dlzm':
+                                    assert use_lzma
+                                    assert block_data.startswith(b'\xfd7zXZ\x00')
+                                elif block_command != b'data':
+                                    raise Exception(f'Unknown block command: {block_command!r}')
+                                block_output_stream.write(block_command)
                                 block_output_stream.write(block_pos.to_bytes(8, 'big'))
                                 block_output_stream.write(len(block_data).to_bytes(4, 'big'))
                                 block_output_stream.write(block_data)
@@ -677,6 +693,8 @@ def do_save(file_path, block_input_stream):
     '''
     Read blocks from block_input_stream and write them to the file.
     '''
+    lzma_decompress = None
+
     if file_path == '-':
         sys.exit('ERROR (save): file_path must be actual file or device, not `-`')
 
@@ -691,8 +709,9 @@ def do_save(file_path, block_input_stream):
                     raise IncompleteReadError('Incomplete read of command from block input stream')
                 if command == b'done':
                     received_done = True
+                    f.flush()
                     break
-                elif command == b'data':
+                elif command in (b'data', b'dlzm'):
                     block_pos_b = block_input_stream.read(8)
                     block_size_b = block_input_stream.read(4)
                     if len(block_pos_b) != 8 or len(block_size_b) != 4:
@@ -702,6 +721,10 @@ def do_save(file_path, block_input_stream):
                     block_data = block_input_stream.read(block_size)
                     if len(block_data) != block_size:
                         raise IncompleteReadError('Incomplete read of block data from block input stream')
+                    if command == b'dlzm':
+                        if lzma_decompress is None:
+                            from lzma import decompress as lzma_decompress
+                        block_data = lzma_decompress(block_data)
                     f.seek(block_pos)
                     f.write(block_data)
                 else:

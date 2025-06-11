@@ -15,7 +15,7 @@ extend-ignore =
     E501
 
 # It's a complex program :)
-max-complexity = 60
+max-complexity = 65
 
 per-file-ignores =
     # imported but unused
