@@ -45,6 +45,8 @@ from threading import Event, Lock
 from time import monotonic
 
 
+__version__ = '0.0.2'
+
 logger = getLogger(__name__)
 
 block_size = 128 * 1024
@@ -103,6 +105,7 @@ class ExceptionCollector:
 def main():
     parser = ArgumentParser()
     parser.add_argument('-v', '--verbose', action='store_true')
+    parser.add_argument('--version', action='version', version=f'blockcopy {__version__}')
 
     subparsers = parser.add_subparsers(dest='command', required=True)
     p_checksum = subparsers.add_parser('checksum')

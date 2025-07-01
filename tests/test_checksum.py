@@ -14,7 +14,7 @@ def test_checksum_file(tmp_path, script_path, terminate_process):
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
         stack.callback(lambda: terminate_process(p1))
-        p1_output, p1_error = p1.communicate(input=test_content, timeout=5)
+        p1_output, p1_error = p1.communicate(input=None, timeout=5)
         assert p1.wait() == 0
         assert p1_error == b''
         assert p1_output == b''.join([
@@ -82,7 +82,7 @@ def test_checksum_file_progress(tmp_path, script_path, terminate_process):
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
         stack.callback(lambda: terminate_process(p1))
-        p1_output, p1_error = p1.communicate(input=test_content, timeout=5)
+        p1_output, p1_error = p1.communicate(input=None, timeout=5)
         assert p1.wait() == 0
         assert p1_output == b''.join([
             b'Hash',
