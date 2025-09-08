@@ -8,7 +8,7 @@ version = "0.0.2"
 authors = [
     { name="Petr Messner", email="petr.messner+github-blockcopy@gmail.com" },
 ]
-description = "Copy large files and block devices effeciently over network"
+description = "Copy large files and block devices efficiently over network"
 readme = "README.md"
 license = { file="LICENSE" }
 requires-python = ">=3.7"

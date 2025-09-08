@@ -1,7 +1,7 @@
 blockcopy
 =========
 
-Copy large files (VM devices, LVM snapshots...) effeciently over network.
+Copy large files (VM devices, LVM snapshots...) efficiently over network.
 
 Designed for copying from/to NVMe disks over gigabit network.
 Uses threadpool for computing hashes so that copy speed is not limited by CPU.

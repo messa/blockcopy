@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 r'''
-Copy large files (or block devices) effeciently over network.
+Copy large files (or block devices) efficiently over network.
 
 The idea is to split the file into blocks, calculate hash of each block and send
 the hashes to the source side. The source side will compare the hashes with the
@@ -619,14 +619,14 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                             exception_collector.collect_exception(exc)
                     finally:
                         hash_queue.task_done()
+            except Exception as exc:
+                logger.exception('do_retrieve hash_worker failed: %r', exc)
+                exception_collector.collect_exception(exc)
             except BaseException as exc:
                 # not sure what the exception could be, but let's log it and re-raise it
                 logger.exception('do_retrieve hash_worker failed (BaseException): %r', exc)
                 exception_collector.collect_exception(exc)
                 raise exc
-            except Exception as exc:
-                logger.exception('do_retrieve hash_worker failed: %r', exc)
-                exception_collector.collect_exception(exc)
 
         def send_worker():
             # Only one will run
