@@ -28,6 +28,10 @@ jobs:
       run: |
         blockcopy --help
 
+    - name: Run --version
+      run: |
+        blockcopy --version
+
     - name: Run end-to-end test
       run: |
         dd if=/dev/urandom bs=1M count=32 of=test_src
