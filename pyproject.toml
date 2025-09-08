@@ -17,7 +17,8 @@ requires-python = ">=3.7"
 blockcopy = "blockcopy:main"
 
 [tool.setuptools]
-py_modules = ["blockcopy"]
+py-modules = ["blockcopy"]
+include-package-data = true
 
 [project.urls]
 Home = "https://github.com/messa/blockcopy"

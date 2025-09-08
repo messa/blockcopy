@@ -19,6 +19,7 @@ Usage:
 
 from argparse import ArgumentParser
 from contextlib import ExitStack
+from sys import stdin
 
 
 def main():
@@ -28,7 +29,7 @@ def main():
 
     with ExitStack() as stack:
         if args.checksum_file == '-':
-            f = sys.stdin.buffer
+            f = stdin.buffer
         else:
             f = stack.enter_context(open(args.checksum_file, 'rb'))
 
