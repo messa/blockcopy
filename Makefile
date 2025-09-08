@@ -1,9 +1,9 @@
-python=python3
+uv=uv
 
 default: check
 
 check:
-	$(python) -m pytest -s -vv tests $(pytest_args)
+	$(uv) run pytest -s -vv tests $(pytest_args)
 
 lint:
-	$(python) -m flake8
+	$(uv) run flake8
