@@ -36,11 +36,11 @@ See also readme: https://github.com/messa/blockcopy
 from argparse import ArgumentParser
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-import hashlib
+from hashlib import sha3_512
 from logging import getLogger
-import os
+from os import cpu_count, environ, getpid, kill, SEEK_END
 from queue import Queue
-import sys
+from sys import exit, stderr, stdin, stdout
 from threading import Event, Lock
 from time import monotonic
 
@@ -50,10 +50,10 @@ __version__ = '0.0.2'
 logger = getLogger(__name__)
 
 block_size = 128 * 1024
-hash_factory = hashlib.sha3_512
+hash_factory = sha3_512
 hash_digest_size = hash_factory().digest_size
 assert hash_digest_size == 512 / 8
-worker_count = min(os.cpu_count(), 8)
+worker_count = min(cpu_count(), 8)
 
 
 class IncompleteReadError(Exception):
@@ -124,28 +124,28 @@ def main():
 
     args = parser.parse_args()
 
-    setup_logging(args.verbose or os.environ.get('DEBUG'))
+    setup_logging(args.verbose or environ.get('DEBUG'))
     logger.debug('Args: %r', args)
 
     ctrl_c_will_terminate_immediately()
 
     try:
         if args.command == 'checksum':
-            do_checksum(args.destination_file, sys.stdout.buffer, start_offset=args.start, end_offset=args.end, show_progress=args.progress)
+            do_checksum(args.destination_file, stdout.buffer, start_offset=args.start, end_offset=args.end, show_progress=args.progress)
         elif args.command == 'retrieve':
-            do_retrieve(args.source_file, sys.stdin.buffer, sys.stdout.buffer, use_lzma=args.lzma)
+            do_retrieve(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma)
         elif args.command == 'save':
-            do_save(args.destination_file, sys.stdin.buffer)
+            do_save(args.destination_file, stdin.buffer)
         else:
             raise Exception(f'Not implemented: {args.command}')
 
         logger.debug('Done')
     except CollectedExceptions as exc:
         logger.error('Failed: %r', exc)
-        sys.exit(f'ERROR ({args.command}): {exc}')
+        exit(f'ERROR ({args.command}): {exc}')
     except Exception as exc:
         logger.exception('Failed: %r', exc)
-        sys.exit(f'ERROR ({args.command}): {exc}')
+        exit(f'ERROR ({args.command}): {exc}')
 
 
 def setup_logging(verbose):
@@ -168,8 +168,8 @@ def ctrl_c_will_terminate_immediately():
     If you know about a better solution, please let me know :)
     '''
     from signal import signal, SIGTERM, SIGINT, SIGKILL
-    signal(SIGINT, lambda *args: os.kill(os.getpid(), SIGKILL))
-    signal(SIGTERM, lambda *args: os.kill(os.getpid(), SIGKILL))
+    signal(SIGINT, lambda *args: kill(getpid(), SIGKILL))
+    signal(SIGTERM, lambda *args: kill(getpid(), SIGKILL))
 
 
 def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_progress):
@@ -188,7 +188,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
     - 4 bytes: command "done"
     '''
     if hash_output_stream.isatty():
-        sys.exit('ERROR (checksum): hash_output_stream is a tty - will not write binary data to terminal')
+        exit('ERROR (checksum): hash_output_stream is a tty - will not write binary data to terminal')
     start_offset = start_offset or 0
     if end_offset is not None:
         assert start_offset < end_offset
@@ -211,7 +211,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
             try:
                 with ExitStack() as stack:
                     if file_path == '-':
-                        f = sys.stdin.buffer
+                        f = stdin.buffer
                     else:
                         f = stack.enter_context(open(file_path, 'rb'))
 
@@ -219,7 +219,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                         if end_offset is None:
                             try:
                                 assert f.tell() == 0
-                                show_progress_total_size = f.seek(0, os.SEEK_END)
+                                show_progress_total_size = f.seek(0, SEEK_END)
                                 f.seek(0)
                             except OSError:
                                 # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
@@ -280,7 +280,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                                 print(
                                     f'Checksum progress: {block_pos/2**30:7.2f} GB / {show_progress_total_size/2**30:.2f} GB'
                                     f' ({show_progress_pct:5.2f}%)',
-                                    file=sys.stderr,
+                                    file=stderr,
                                     flush=True)
 
                     if end_offset is None:
@@ -399,7 +399,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
 
     if show_progress:
         checksum_duration = monotonic() - checksum_start_time
-        print(f'Checksum done in {checksum_duration:.3f} seconds', file=sys.stderr, flush=True)
+        print(f'Checksum done in {checksum_duration:.3f} seconds', file=stderr, flush=True)
 
 
 def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
@@ -425,10 +425,10 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
         from lzma import compress as lzma_compress
 
     if file_path == '-':
-        sys.exit('ERROR (retrieve): file_path must be actual file or device, not `-`')
+        exit('ERROR (retrieve): file_path must be actual file or device, not `-`')
 
     if block_output_stream.isatty():
-        sys.exit('ERROR (retrieve): block_output_stream is a tty - will not write binary data to terminal')
+        exit('ERROR (retrieve): block_output_stream is a tty - will not write binary data to terminal')
 
     with ThreadPoolExecutor(worker_count + 2, thread_name_prefix='retrieve') as executor:
         block_output_stream_lock = Lock()
@@ -681,11 +681,11 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
     exception_collector.check_and_raise()
 
     if encountered_incomplete_read:
-        sys.exit(f'ERROR (retrieve): {encountered_incomplete_read}')
+        exit(f'ERROR (retrieve): {encountered_incomplete_read}')
 
     if not received_done:
         # This should not happen, becase that should already trigger the incomplete read exception.
-        sys.exit('ERROR (retrieve): Received no done command from the checksum side')
+        exit('ERROR (retrieve): Received no done command from the checksum side')
 
     with block_output_stream_lock:
         block_output_stream.write(b'done')
@@ -699,7 +699,7 @@ def do_save(file_path, block_input_stream):
     lzma_decompress = None
 
     if file_path == '-':
-        sys.exit('ERROR (save): file_path must be actual file or device, not `-`')
+        exit('ERROR (save): file_path must be actual file or device, not `-`')
 
     try:
         received_done = False
@@ -735,9 +735,9 @@ def do_save(file_path, block_input_stream):
 
         if not received_done:
             # Should not happen - should already trigger the incomplete read exception.
-            sys.exit('ERROR (save): Received no done command from the retrieve side')
+            exit('ERROR (save): Received no done command from the retrieve side')
     except IncompleteReadError as exc:
-        sys.exit(f'ERROR (save): {exc}')
+        exit(f'ERROR (save): {exc}')
 
 
 if __name__ == "__main__":

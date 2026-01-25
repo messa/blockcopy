@@ -1,12 +1,11 @@
 from contextlib import ExitStack
-import subprocess
-from subprocess import Popen, PIPE, DEVNULL
+from subprocess import DEVNULL, PIPE, Popen, run
 from sys import executable
 
 
 def test_help(script_path):
     cmd = [script_path, '--help']
-    assert subprocess.run(cmd, stdout=DEVNULL, stderr=DEVNULL).returncode == 0
+    assert run(cmd, stdout=DEVNULL, stderr=DEVNULL).returncode == 0
 
 
 def test_copy_tiny(tmp_path, script_path):
