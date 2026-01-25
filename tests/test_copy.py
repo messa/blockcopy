@@ -90,7 +90,9 @@ def test_copy_tiny_incomplete_hash_stream(tmp_path, script_path):
 
 
 
-def test_copy(tmp_path, script_path):
+@mark.parametrize('use_truncate', [False, True], ids=['no_truncate', 'truncate'])
+@mark.parametrize('use_lzma', [False, True], ids=['no_lzma', 'lzma'])
+def test_copy(tmp_path, script_path, use_truncate, use_lzma):
     test_content = b'Test content.' * 1024000
     src_path = tmp_path / 'src_file'
     src_path.write_bytes(test_content)
@@ -99,8 +101,8 @@ def test_copy(tmp_path, script_path):
     assert dst_path.read_bytes() != test_content
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', *(['--lzma'] if use_lzma else []), str(src_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if use_truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -114,32 +116,9 @@ def test_copy(tmp_path, script_path):
     assert dst_path.read_bytes() == test_content
 
 
-def test_copy_lzma(tmp_path, script_path):
-    test_content = b'Test content.' * 1024000
-    src_path = tmp_path / 'src_file'
-    src_path.write_bytes(test_content)
-    dst_path = tmp_path / 'dst_file'
-    dst_path.write_bytes(b'-' * len(test_content))
-    assert dst_path.read_bytes() != test_content
-
-    cmd1 = [executable, script_path, 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, 'retrieve', '--lzma', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
-
-    with ExitStack() as stack:
-        p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
-        p2 = stack.enter_context(Popen(cmd2, stdin=p1.stdout, stdout=PIPE))
-        p3 = stack.enter_context(Popen(cmd3, stdin=p2.stdout))
-        assert p1.wait() == 0
-        assert p2.wait() == 0
-        assert p3.wait() == 0
-
-    assert src_path.read_bytes() == test_content
-    assert dst_path.read_bytes() == test_content
-
-
-@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
-def test_copy_to_larger_file_tiny(tmp_path, script_path, truncate):
+@mark.parametrize('use_truncate', [False, True], ids=['no_truncate', 'truncate'])
+@mark.parametrize('use_lzma', [False, True], ids=['no_lzma', 'lzma'])
+def test_copy_to_larger_file_tiny(tmp_path, script_path, use_truncate, use_lzma):
     '''
     Copying from smaller source file to larger destination file.
 
@@ -153,8 +132,8 @@ def test_copy_to_larger_file_tiny(tmp_path, script_path, truncate):
     dst_path.write_bytes(b'-' * len(test_content) + b'extra')
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', *(['--lzma'] if use_lzma else []), str(src_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if use_truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -183,13 +162,15 @@ def test_copy_to_larger_file_tiny(tmp_path, script_path, truncate):
         assert p3.wait() == 0
         assert p3_output == b''
 
-    if truncate:
+    if use_truncate:
         assert dst_path.read_bytes() == test_content
     else:
         assert dst_path.read_bytes() == test_content + b'extra'
 
 
-def test_copy_to_larger_file(tmp_path, script_path):
+@mark.parametrize('use_truncate', [False, True], ids=['no_truncate', 'truncate'])
+@mark.parametrize('use_lzma', [False, True], ids=['no_lzma', 'lzma'])
+def test_copy_to_larger_file(tmp_path, script_path, use_truncate, use_lzma):
     '''
     This test simulates copying from smaller to larger device or file.
     Contents of the destination file is replaced with the source file contents.
@@ -202,8 +183,8 @@ def test_copy_to_larger_file(tmp_path, script_path):
     dst_path.write_bytes(b'-' * len(test_content) + b'extra')
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', *(['--lzma'] if use_lzma else []), str(src_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if use_truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -213,11 +194,15 @@ def test_copy_to_larger_file(tmp_path, script_path):
         assert p2.wait() == 0
         assert p3.wait() == 0
 
-    assert dst_path.read_bytes() == test_content + b'extra'
+    if use_truncate:
+        assert dst_path.read_bytes() == test_content
+    else:
+        assert dst_path.read_bytes() == test_content + b'extra'
 
 
-@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
-def test_copy_identical(tmp_path, script_path, truncate):
+@mark.parametrize('use_truncate', [False, True], ids=['no_truncate', 'truncate'])
+@mark.parametrize('use_lzma', [False, True], ids=['no_lzma', 'lzma'])
+def test_copy_identical(tmp_path, script_path, use_truncate, use_lzma):
     '''
     This tests checks that no actual data is copied when source and destination are identical.
     '''
@@ -228,8 +213,8 @@ def test_copy_identical(tmp_path, script_path, truncate):
     dst_path.write_bytes(test_content)
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', *(['--lzma'] if use_lzma else []), str(src_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if use_truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -251,8 +236,9 @@ def test_copy_identical(tmp_path, script_path, truncate):
     assert dst_path.read_bytes() == test_content
 
 
-@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
-def test_copy_to_smaller_file(tmp_path, script_path, truncate):
+@mark.parametrize('use_truncate', [False, True], ids=['no_truncate', 'truncate'])
+@mark.parametrize('use_lzma', [False, True], ids=['no_lzma', 'lzma'])
+def test_copy_to_smaller_file(tmp_path, script_path, use_truncate, use_lzma):
     '''
     This test simulates copying from larger source file to smaller destination file.
     This could happen for example when previous copy was interrupted.
@@ -266,8 +252,8 @@ def test_copy_to_smaller_file(tmp_path, script_path, truncate):
     dst_path.write_bytes(b'-' * (len(test_content) // 2))
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
-    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', *(['--lzma'] if use_lzma else []), str(src_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if use_truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -280,8 +266,9 @@ def test_copy_to_smaller_file(tmp_path, script_path, truncate):
     assert dst_path.read_bytes() == test_content
 
 
-@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
-def test_copy_start_offset_tiny(tmp_path, script_path, truncate):
+@mark.parametrize('use_truncate', [False, True], ids=['no_truncate', 'truncate'])
+@mark.parametrize('use_lzma', [False, True], ids=['no_lzma', 'lzma'])
+def test_copy_start_offset_tiny(tmp_path, script_path, use_truncate, use_lzma):
     test_content = b'Hello World!'
     src_path = tmp_path / 'src_file'
     src_path.write_bytes(test_content)
@@ -289,8 +276,8 @@ def test_copy_start_offset_tiny(tmp_path, script_path, truncate):
     dst_path.write_bytes(b'-' * len(test_content))
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path), '--start', str(5)]
-    cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
+    cmd2 = [executable, script_path, 'retrieve', *(['--lzma'] if use_lzma else []), str(src_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if use_truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
