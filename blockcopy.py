@@ -121,6 +121,7 @@ def main():
     p_retrieve.add_argument('--lzma', action='store_true', help='use lzma compression')
 
     p_save.add_argument('destination_file')
+    p_save.add_argument('--truncate', action='store_true', help='truncate the destination file to the size of the source file')
 
     args = parser.parse_args()
 
@@ -135,7 +136,7 @@ def main():
         elif args.command == 'retrieve':
             do_retrieve(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma)
         elif args.command == 'save':
-            do_save(args.destination_file, stdin.buffer)
+            do_save(args.destination_file, stdin.buffer, truncate=args.truncate)
         else:
             raise Exception(f'Not implemented: {args.command}')
 
@@ -419,7 +420,8 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
     - 4 bytes: size of the block
     - N bytes: block data
     - ...
-    - 4 bytes: command "done"
+    - 4 bytes: command "Done"
+    - 8 bytes: size of the source file
     '''
     if use_lzma:
         from lzma import compress as lzma_compress
@@ -687,14 +689,20 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
         # This should not happen, because that should already trigger the incomplete read exception.
         exit('ERROR (retrieve): Received no done command from the checksum side')
 
+    with open(file_path, 'rb') as f:
+        total_size = f.seek(0, SEEK_END)
+
     with block_output_stream_lock:
-        block_output_stream.write(b'done')
+        block_output_stream.write(b'Done')
+        block_output_stream.write(total_size.to_bytes(8, 'big'))
         block_output_stream.flush()
 
 
-def do_save(file_path, block_input_stream):
+def do_save(file_path, block_input_stream, truncate=False):
     '''
     Read blocks from block_input_stream and write them to the file.
+
+    If truncate is True, truncate the file to the size of the source file.
     '''
     lzma_decompress = None
 
@@ -711,8 +719,20 @@ def do_save(file_path, block_input_stream):
                 if len(command) != 4:
                     raise IncompleteReadError('Incomplete read of command from block input stream')
                 if command == b'done':
+                    # Old variant of the done command - no size of the source file
                     received_done = True
                     f.flush()
+                    # Cannot truncate here - we do not know the size of the source file.
+                    # We know only the offset of the end of last changed block.
+                    break
+                if command == b'Done':
+                    # New variant of the done command - contains the size of the source file
+                    received_done = True
+                    f.flush()
+                    done_pos_b = block_input_stream.read(8)
+                    done_pos = int.from_bytes(done_pos_b, 'big')
+                    if truncate:
+                        f.truncate(done_pos)
                     break
                 elif command in (b'data', b'dlzm'):
                     block_pos_b = block_input_stream.read(8)

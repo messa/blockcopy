@@ -1,4 +1,5 @@
 from contextlib import ExitStack
+from pytest import mark
 from subprocess import DEVNULL, PIPE, Popen, run
 from sys import executable
 
@@ -37,7 +38,7 @@ def test_copy_tiny(tmp_path, script_path):
         p2 = stack.enter_context(Popen(cmd2, stdin=PIPE, stdout=PIPE))
         p2_output, _ = p2.communicate(input=p1_output, timeout=5)
         assert p2.wait() == 0
-        assert p2_output == b'data\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0cHello World!done'
+        assert p2_output == b'data\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0cHello World!Done\x00\x00\x00\x00\x00\x00\x00\x0c'
 
         p3 = stack.enter_context(Popen(cmd3, stdin=PIPE, stdout=PIPE))
         p3_output, _ = p3.communicate(input=p2_output, timeout=5)
@@ -137,7 +138,14 @@ def test_copy_lzma(tmp_path, script_path):
     assert dst_path.read_bytes() == test_content
 
 
-def test_copy_to_larger_file_tiny(tmp_path, script_path):
+@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
+def test_copy_to_larger_file_tiny(tmp_path, script_path, truncate):
+    '''
+    Copying from smaller source file to larger destination file.
+
+    Without truncate: the destination file size remains the same.
+    With truncate: the destination file size will be equal to the source file.
+    '''
     test_content = b'Hello World!'
     src_path = tmp_path / 'src_file'
     src_path.write_bytes(test_content)
@@ -146,7 +154,7 @@ def test_copy_to_larger_file_tiny(tmp_path, script_path):
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
     cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -168,14 +176,17 @@ def test_copy_to_larger_file_tiny(tmp_path, script_path):
         p2 = stack.enter_context(Popen(cmd2, stdin=PIPE, stdout=PIPE))
         p2_output, _ = p2.communicate(input=p1_output, timeout=5)
         assert p2.wait() == 0
-        assert p2_output == b'data\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0cHello World!done'
+        assert p2_output == b'data\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x0cHello World!Done\x00\x00\x00\x00\x00\x00\x00\x0c'
 
         p3 = stack.enter_context(Popen(cmd3, stdin=PIPE, stdout=PIPE))
         p3_output, _ = p3.communicate(input=p2_output, timeout=5)
         assert p3.wait() == 0
         assert p3_output == b''
 
-    assert dst_path.read_bytes() == test_content + b'extra'
+    if truncate:
+        assert dst_path.read_bytes() == test_content
+    else:
+        assert dst_path.read_bytes() == test_content + b'extra'
 
 
 def test_copy_to_larger_file(tmp_path, script_path):
@@ -205,7 +216,8 @@ def test_copy_to_larger_file(tmp_path, script_path):
     assert dst_path.read_bytes() == test_content + b'extra'
 
 
-def test_copy_identical(tmp_path, script_path):
+@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
+def test_copy_identical(tmp_path, script_path, truncate):
     '''
     This tests checks that no actual data is copied when source and destination are identical.
     '''
@@ -217,7 +229,7 @@ def test_copy_identical(tmp_path, script_path):
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
     cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -233,12 +245,14 @@ def test_copy_identical(tmp_path, script_path):
         assert p3.wait() == 0
 
         # retrieve output should be trivial
-        assert p2_output == b'done'
+        assert p2_output == b'Done' + len(test_content).to_bytes(8, 'big')
 
+    assert src_path.read_bytes() == test_content
     assert dst_path.read_bytes() == test_content
 
 
-def test_copy_to_smaller_file(tmp_path, script_path):
+@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
+def test_copy_to_smaller_file(tmp_path, script_path, truncate):
     '''
     This test simulates copying from larger source file to smaller destination file.
     This could happen for example when previous copy was interrupted.
@@ -253,7 +267,7 @@ def test_copy_to_smaller_file(tmp_path, script_path):
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path)]
     cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -266,7 +280,8 @@ def test_copy_to_smaller_file(tmp_path, script_path):
     assert dst_path.read_bytes() == test_content
 
 
-def test_copy_start_offset_tiny(tmp_path, script_path):
+@mark.parametrize('truncate', [False, True], ids=['no_truncate', 'truncate'])
+def test_copy_start_offset_tiny(tmp_path, script_path, truncate):
     test_content = b'Hello World!'
     src_path = tmp_path / 'src_file'
     src_path.write_bytes(test_content)
@@ -275,7 +290,7 @@ def test_copy_start_offset_tiny(tmp_path, script_path):
 
     cmd1 = [executable, script_path, 'checksum', str(dst_path), '--start', str(5)]
     cmd2 = [executable, script_path, 'retrieve', str(src_path)]
-    cmd3 = [executable, script_path, 'save', str(dst_path)]
+    cmd3 = [executable, script_path, 'save', *(['--truncate'] if truncate else []), str(dst_path)]
 
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE))
@@ -302,7 +317,8 @@ def test_copy_start_offset_tiny(tmp_path, script_path):
             b'\x00\x00\x00\x00\x00\x00\x00\x05'
             b'\x00\x00\x00\x07'
             b' World!'
-            b'done'
+            b'Done'
+            b'\x00\x00\x00\x00\x00\x00\x00\x0c'
         )
 
         p3 = stack.enter_context(Popen(cmd3, stdin=PIPE, stdout=PIPE))
@@ -311,3 +327,4 @@ def test_copy_start_offset_tiny(tmp_path, script_path):
         assert p3_output == b''
 
     assert dst_path.read_bytes() == b'-' * 5 + test_content[5:]
+    assert dst_path.read_bytes() == b'----- World!'
