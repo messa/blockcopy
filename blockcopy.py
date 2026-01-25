@@ -388,8 +388,8 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
 
     with hash_output_stream_lock:
         if source_end_offset is not None:
-            # Instruct the retrieve process to send data afther the last hashed block.
-            # This is necessary when the destination file (which are we checksumming now)
+            # Instruct the retrieve process to send data after the last hashed block.
+            # This is necessary when the destination file (which we are checksumming now)
             # is smaller than the source file and we want to copy the whole source file.
             hash_output_stream.write(b'rest')
             hash_output_stream.write(source_end_offset.to_bytes(8, 'big'))
@@ -476,7 +476,7 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                             break
 
                         elif command == b'hash':
-                            # This is the deprecated version of the hash commmand - does not contain
+                            # This is the deprecated version of the hash command - does not contain
                             # block position.
 
                             block_size_b = hash_input_stream.read(4)
@@ -512,7 +512,7 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                             if len(block_data) == block_size:
                                 hash_batch.append((destination_hash, block_pos, block_data))
                             elif block_data:
-                                # Probable just at end of source file while the destination file is larger.
+                                # Probably just at end of source file while the destination file is larger.
                                 # Let's send whatever we have read.
                                 hash_batch.append((None, block_pos, block_data))
                             else:
@@ -684,7 +684,7 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
         exit(f'ERROR (retrieve): {encountered_incomplete_read}')
 
     if not received_done:
-        # This should not happen, becase that should already trigger the incomplete read exception.
+        # This should not happen, because that should already trigger the incomplete read exception.
         exit('ERROR (retrieve): Received no done command from the checksum side')
 
     with block_output_stream_lock:

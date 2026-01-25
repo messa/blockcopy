@@ -180,7 +180,7 @@ def test_copy_to_larger_file_tiny(tmp_path, script_path):
 
 def test_copy_to_larger_file(tmp_path, script_path):
     '''
-    This tests simulates copying from smaller to larger device or file.
+    This test simulates copying from smaller to larger device or file.
     Contents of the destination file is replaced with the source file contents.
     Contents of the destination file beyond the size of the source file is not changed.
     '''
@@ -240,8 +240,8 @@ def test_copy_identical(tmp_path, script_path):
 
 def test_copy_to_smaller_file(tmp_path, script_path):
     '''
-    This tests simulates copying from larger source file to smaller destination file.
-    This could happend for example when previous copy was interrupted.
+    This test simulates copying from larger source file to smaller destination file.
+    This could happen for example when previous copy was interrupted.
     It is expected that the destination file will become equal to the source file,
     including extending the destination file size.
     '''
