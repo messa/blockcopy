@@ -12,17 +12,6 @@ Tento dokument popisuje návrh implementace volby `--recursive` pro nástroj blo
 
 ## Návrh protokolu
 
-### Společné konstanty
-
-```python
-# Příznaky akcí (používané v protokolu retrieve → save)
-FLAG_UNCHANGED = 0x00  # beze změny
-FLAG_NEW       = 0x01  # nový soubor/adresář
-FLAG_MODIFIED  = 0x02  # změněný obsah
-FLAG_DELETE    = 0x04  # smazat (existuje na dest, neexistuje na source)
-FLAG_META_ONLY = 0x08  # změnit pouze metadata
-```
-
 **Poznámka k symlinkům:** Symlinky se následují (followlinks=True). Přenáší se obsah cílového souboru/adresáře, nikoliv samotný symlink. Tím se zjednodušuje protokol a chování je konzistentní.
 
 ### Protokol checksum → retrieve
@@ -97,10 +86,9 @@ Retrieve čte hashe ze stdin, porovnává se zdrojovými soubory a odesílá zm�
 file           (4 bytes)  - command identifier
 path_len       (4 bytes)  - délka cesty v bajtech
 path           (N bytes)  - relativní cesta (UTF-8)
-flags          (1 byte)   - příznaky akce (FLAG_*)
 ```
 
-Po příkazu `file` následují datové bloky (pokud `FLAG_NEW` nebo `FLAG_MODIFIED`):
+Po příkazu `file` mohou následovat datové bloky (pro změněné/nové soubory) a vždy metadata:
 
 #### Příkaz `data` (beze změny) - datový blok
 
@@ -149,10 +137,9 @@ endf           (4 bytes)  - command identifier
 dire           (4 bytes)  - command identifier
 path_len       (4 bytes)  - délka cesty v bajtech
 path           (N bytes)  - relativní cesta (UTF-8)
-flags          (1 byte)   - příznaky akce (FLAG_*)
 ```
 
-Pro adresáře následuje pouze metadata (pokud `FLAG_NEW` nebo `FLAG_META_ONLY`):
+Po příkazu `dire` následují metadata:
 
 #### Příkaz `dmet` - metadata adresáře
 
@@ -191,29 +178,28 @@ done           (4 bytes)  - command identifier
 #### Příklad toku dat (retrieve)
 
 ```
-# Nový soubor
-file + "src/new_file.py" + FLAG_NEW
+# Nový soubor (všechna data)
+file + "src/new_file.py"
   data + 0 + 1024 + <data>
-  meta + <metadata>
+  meta + <metadata s total_size=1024>
 endf
 
 # Změněný soubor (jen některé bloky)
-file + "src/main.py" + FLAG_MODIFIED
+file + "src/main.py"
   data + 131072 + 512 + <changed_block>
+  meta + <metadata s total_size>
+endf
+
+# Beze změny (jen metadata, žádná data)
+file + "src/utils/helper.py"
   meta + <metadata>
 endf
 
-# Beze změny (přeskočí se nebo jen meta update)
-file + "src/utils/helper.py" + FLAG_UNCHANGED
-  meta + <metadata>
-endf
-
-# Nový adresář
-dire + "src/new_dir/" + FLAG_NEW
+# Adresář
+dire + "src/new_dir/"
   dmet + <metadata>
 
-# Existující adresář beze změny (metadata update)
-dire + "src/utils/" + FLAG_META_ONLY
+dire + "src/utils/"
   dmet + <metadata>
 
 # Smazat soubor (existuje na dest, ne na source)
@@ -224,6 +210,12 @@ remv + "src/old_dir/"
 
 done
 ```
+
+**Poznámka:** Save odvozuje akci z přijatých dat:
+- Přišla `data` → zapsat bloky na dané pozice
+- `meta.total_size` → truncate soubor na správnou velikost
+- `dmet` → vytvořit adresář (pokud neexistuje) a nastavit metadata
+- `remv` → smazat položku
 
 ## Algoritmus zpracování
 
@@ -247,19 +239,19 @@ done
 1. Pokud --recursive:
    a. Načíst manifest položek ze source adresáře (followlinks=True)
    b. Číst příkazy ze stdin (checksum výstup)
-   c. Pro každý 'file':
+   c. Pro každý 'file' z dest:
       - Najít odpovídající source soubor
       - Porovnat hashe bloků
-      - Určit akci (FLAG_NEW, FLAG_MODIFIED, FLAG_UNCHANGED)
-   d. Pro každý 'dire':
+      - Poslat 'file' + změněné data bloky + meta
+   d. Pro každý 'dire' z dest:
       - Najít odpovídající source adresář
-      - Určit akci
+      - Poslat 'dire' + dmet
    e. Po 'done' ze stdin:
       - Identifikovat source položky bez dest protějšku (nové)
-      - Identifikovat dest položky bez source protějšku (k smazání)
-   f. Odeslat všechny položky s příslušnými akcemi
-   g. Odeslat příkazy 'remv' pro položky k smazání
-   h. Odeslat 'done'
+      - Poslat 'file'/'dire' pro nové položky
+      - Pokud --delete: identifikovat dest položky bez source protějšku
+      - Poslat 'remv' pro položky k smazání
+   f. Odeslat 'done'
 2. Jinak (původní chování):
    - Zpracovat jako dosud
 ```
@@ -270,11 +262,12 @@ done
 1. Pokud --recursive:
    a. Zpracovat příkazy ze stdin
    b. Pro každý 'dire':
-      - FLAG_NEW: vytvořit adresář
-      - Aplikovat metadata z 'dmet' (pokud následuje)
+      - Vytvořit adresář (pokud neexistuje)
+      - Aplikovat metadata z 'dmet'
    c. Pro každý 'file':
-      - FLAG_NEW: vytvořit soubor, zapsat data
-      - FLAG_MODIFIED: zapsat změněné bloky
+      - Otevřít/vytvořit soubor
+      - Zapsat všechny přijaté 'data' bloky
+      - Truncate na velikost z 'meta.total_size'
       - Aplikovat metadata z 'meta'
    d. Pro každý 'remv':
       - Smazat soubor nebo adresář (rekurzivně)
@@ -339,14 +332,14 @@ Výhody tohoto přístupu:
 Pokud se typ položky změní (soubor → adresář nebo adresář → soubor):
 
 1. Poslat příkaz `remv` pro starou položku
-2. Poslat příkaz `file` nebo `dire` s `FLAG_NEW` pro novou položku
+2. Poslat příkaz `file` nebo `dire` pro novou položku (s daty/metadaty)
 
 ### Soubory s nulovou velikostí
 
 - Přenášet jako běžné soubory bez hashů
-- `file` bude mít `file_size = 0`
+- `file` (checksum) bude mít `file_size = 0`
 - Nepošlou se žádné `Hash` příkazy
-- V retrieve se pošle `FLAG_NEW` nebo `FLAG_UNCHANGED` podle existence
+- V retrieve se pošle `file` + `meta` (bez data bloků)
 
 ### Oprávnění a přístup
 
@@ -364,7 +357,7 @@ Adresáře se musí vytvářet před soubory, které obsahují:
 
 Soubory a adresáře mazat v opačném pořadí (potomci před rodiči):
 
-- Příkazy `FLAG_DELETE` seřadit sestupně podle hloubky cesty
+- Příkazy `remv` seřadit sestupně podle hloubky cesty
 - Nebo mazat rekurzivně pomocí `shutil.rmtree()` pro adresáře
 
 ## Paralelizace
@@ -411,12 +404,12 @@ def read_directory_manifest(path: Path) -> Dict[str, DirEntry]:
 
 def send_file_header(out: IO, path: str, size: int):
     """
-    Odešle příkaz 'file' (checksum → retrieve).
+    Odešle příkaz 'file' (checksum → retrieve, s velikostí).
     """
 
-def send_file_header_with_flags(out: IO, path: str, flags: int):
+def send_file_header_retrieve(out: IO, path: str):
     """
-    Odešle příkaz 'file' (retrieve → save).
+    Odešle příkaz 'file' (retrieve → save, bez velikosti).
     """
 
 def send_end_file(out: IO):
@@ -426,12 +419,7 @@ def send_end_file(out: IO):
 
 def send_dire_header(out: IO, path: str):
     """
-    Odešle příkaz 'dire' (checksum → retrieve).
-    """
-
-def send_dire_header_with_flags(out: IO, path: str, flags: int):
-    """
-    Odešle příkaz 'dire' (retrieve → save).
+    Odešle příkaz 'dire' (pro oba směry - stejný formát).
     """
 
 def send_dire_meta(out: IO, ...):
@@ -486,9 +474,6 @@ def test_dire_command_encoding():
 
 def test_dire_command_decoding():
     """Test správného dekódování příkazu 'dire'."""
-
-def test_file_with_flags_encoding():
-    """Test kódování příkazu 'file' s příznaky (retrieve)."""
 
 def test_remv_command_encoding():
     """Test kódování příkazu 'remv'."""
@@ -694,8 +679,8 @@ def test_recursive_disk_full():
 
 1. Implementovat `read_directory_manifest()`
 2. Rozšířit `main_retrieve()` o větev pro `--recursive`
-3. Implementovat porovnávání a určení akcí (FLAG_*)
-4. Implementovat generování příkazů `remv` pro smazání
+3. Implementovat porovnávání hashů a odesílání změněných bloků
+4. Implementovat generování příkazů `remv` pro smazání (s --delete)
 5. Napsat testy pro retrieve fázi
 
 ### Fáze 4: Save s --recursive
