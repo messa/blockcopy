@@ -1,5 +1,10 @@
 # Plán: Přidat volby pro zachování metadata k příkazu save
 
+
+TODO: add --numeric-ids option like in rsync
+TODO: when setting owner/group, find the user/group by name, or id when --numeric-ids is specified
+
+
 ## Přehled
 
 Přidat volby `--times` (`-t`), `--perms` (`-p`), `--owner` (`-o`), `--group` (`-g`) k příkazu `save`, které způsobí nastavení příslušných metadata cílového souboru na hodnoty zdrojového souboru.
@@ -56,6 +61,8 @@ with block_output_stream_lock:
     block_output_stream.flush()
 ```
 
+TODO: přidat posílání owner/group také jako řetězce
+
 ### 5. Rozšíření do_save - signatura (řádek ~701)
 
 ```python
@@ -69,7 +76,7 @@ def do_save(file_path, block_input_stream, truncate=False,
 Přidat novou větev pro příkaz `Meta`:
 
 ```python
-elif command == b'Meta':
+elif command == b'meta':
     # Read metadata: atime_ns(8) + mtime_ns(8) + mode(4) + uid(4) + gid(4) = 28 bytes
     meta_data = block_input_stream.read(28)
     if len(meta_data) != 28:
@@ -119,7 +126,7 @@ def test_copy_with_metadata(tmp_path, script_path, use_times, use_perms):
 
 Formát:
 ```
-Meta (4 bytes "Meta")
+meta (4 bytes "meta")
 atime_ns (8 bytes, signed big-endian)
 mtime_ns (8 bytes, signed big-endian)
 mode (4 bytes, unsigned big-endian)
@@ -129,7 +136,7 @@ gid (4 bytes, unsigned big-endian)
 
 Celkem: 4 + 28 = 32 bajtů
 
-Pořadí příkazů v protokolu: `data/dlzm...` → `Meta` → `Done`
+Pořadí příkazů v protokolu: `data/dlzm...` → `meta` → `Done`
 
 ## Kritické soubory
 

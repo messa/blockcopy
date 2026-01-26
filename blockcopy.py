@@ -730,6 +730,8 @@ def do_save(file_path, block_input_stream, truncate=False):
                     received_done = True
                     f.flush()
                     done_pos_b = block_input_stream.read(8)
+                    if len(done_pos_b) != 8:
+                        raise IncompleteReadError('Incomplete read of done position from block input stream')
                     done_pos = int.from_bytes(done_pos_b, 'big')
                     if truncate:
                         f.truncate(done_pos)
