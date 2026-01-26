@@ -10,7 +10,7 @@ Tento dokument popisuje návrh implementace volby `--recursive` pro nástroj blo
 
 1. **Jednosměrný tok dat** - zachován stávající model: checksum → retrieve → save
 2. **Přenos pouze rozdílů** - přečtou se a zahashují všechny soubory na obou stranách, přenesou se jen změněné bloky
-3. **Deterministické pořadí** - položky se zpracovávají v abecedním pořadí relativních cest (lexikografické řazení UTF-8 bytů), což zajišťuje reprodukovatelné chování
+3. **Deterministické pořadí** - checksum odesílá položky v abecedním pořadí relativních cest (lexikografické řazení UTF-8 bytů). Retrieve odpovídá ve stejném pořadí, pak přidává nové položky ze source (abecedně), a nakonec příkazy `remv`. Toto zajišťuje reprodukovatelné chování a správné pořadí vytváření (rodiče před potomky).
 
 ## Návrh protokolu
 
@@ -245,17 +245,19 @@ done
    c. Pro každý `'file'` z dest:
       - Přidat cestu do `seen_paths`
       - Zkontrolovat on-demand, jestli soubor existuje na source
-      - Pokud existuje: porovnat hashe, poslat `'file'` + změněné datové bloky + `'meta'`
+      - Pokud existuje jako soubor: porovnat hashe, poslat `'file'` + změněné datové bloky + `'meta'`
+      - Pokud existuje jako adresář: vypsat warning "type changed: file → dir", přeskočit
       - Pokud neexistuje na source: přidat cestu do `to_delete`
    d. Pro každý `'dire'` z dest:
       - Přidat cestu do `seen_paths`
       - Zkontrolovat on-demand, jestli adresář existuje na source
-      - Pokud existuje: poslat `'dire'` + `'dmet'`
+      - Pokud existuje jako adresář: poslat `'dire'` + `'dmet'`
+      - Pokud existuje jako soubor: vypsat warning "type changed: dir → file", přeskočit
       - Pokud neexistuje na source: přidat cestu do `to_delete`
    e. Po `'done'` ze stdin:
       - Projít source adresář (`followlinks=True`)
       - Pro každou položku která není v `seen_paths`: poslat jako novou
-      - Pokud `--delete`: poslat `'remv'` pro položky v `to_delete`
+      - Poslat `'remv'` pro položky v `to_delete` (save bez `--delete` je ignoruje)
    f. Odeslat `'done'`
 2. Jinak (původní chování):
    - Zpracovat jako dosud
@@ -275,7 +277,8 @@ done
         - Truncate na velikost z `'meta'.total_size`
         - Aplikovat metadata z `'meta'`
       - Pro každý `'remv'`:
-        - Smazat soubor nebo adresář (rekurzivně)
+        - Pokud `--delete`: smazat soubor nebo adresář (rekurzivně)
+        - Bez `--delete`: ignorovat (položka zůstane na dest)
    c. Po `'done'`:
       - Aplikovat metadata adresářů z `pending_dir_metadata` (v opačném pořadí - potomci před rodiči)
    d. Skončit
@@ -302,7 +305,7 @@ Smazat soubory na dest, které neexistují na source:
 blockcopy save --recursive --delete /path/to/dest_dir
 ```
 
-**Výchozí chování**: bez `--delete` se soubory na dest zachovávají.
+**Výchozí chování**: bez `--delete` se příkazy `remv` od retrieve ignorují a soubory na dest zůstávají zachovány. Retrieve vždy posílá `remv` příkazy pro položky chybějící na source.
 
 ### Volba `--exclude` (budoucí rozšíření)
 
@@ -336,6 +339,8 @@ Symlinky se následují (followlinks=True při os.walk). Toto znamená:
 - Symlink na adresář: rekurzivně se projde cílový adresář
 - Broken symlink: přeskočí se s varováním na stderr (cíl neexistuje)
 
+**Detekce cyklů:** Při followlinks=True může dojít k cyklům (např. `/a/b/link → /a`). Funkce `walk_directory()` sleduje navštívené adresáře pomocí `(st_dev, st_ino)` a přeskočí již navštívené s varováním na stderr.
+
 Výhody tohoto přístupu:
 - Jednodušší protokol (není potřeba FTYPE_SYMLINK)
 - Destination dostane skutečná data, ne závislost na lokálních cestách
@@ -345,8 +350,11 @@ Výhody tohoto přístupu:
 
 Pokud se typ položky změní (soubor → adresář nebo adresář → soubor):
 
-1. Poslat příkaz `remv` pro starou položku
-2. Poslat příkaz `file` nebo `dire` pro novou položku (s daty/metadaty)
+- Vypsat varování na stderr (logging warning)
+- Položku přeskočit (nepřenášet ani nemazat)
+- Uživatel musí ručně vyřešit konflikt na destination
+
+**Zdůvodnění:** Automatická změna typu (smazání + vytvoření nového) by mohla vést k neočekávané ztrátě dat. Explicitní varování a manuální zásah je bezpečnější.
 
 ### Soubory s nulovou velikostí
 
@@ -433,6 +441,7 @@ def walk_directory(path: Path, followlinks: bool = True) -> Iterator[Tuple[Path,
 
     Položky jsou seřazené abecedně podle cesty.
     Symlinky se následují (followlinks=True).
+    Detekuje cykly pomocí (st_dev, st_ino) a přeskočí navštívené adresáře.
     """
 
 def send_file_header(out: IO, path: str, size: int):
@@ -770,12 +779,25 @@ Původní návrh obsahoval FLAG_NEW, FLAG_MODIFIED, FLAG_UNCHANGED pro indikaci 
 
 Toto zjednodušuje protokol a eliminuje redundanci.
 
-### Umístění `--delete` na retrieve (ne na save)
+### Umístění `--delete` na save
 
-Volba `--delete` určuje, zda se mají mazat položky chybějící na source. Retrieve je správné místo, protože:
-- Retrieve zná stav source adresáře
-- Retrieve generuje příkazy `remv` pro položky k smazání
-- Save pouze vykonává přijaté příkazy
+Volba `--delete` určuje, zda se mají mazat položky chybějící na source. Save je správné místo, protože:
+- Uživatel typicky sedí u destination serveru a spouští pipeline odtud
+- Uživatel má kontrolu nad tím, co se děje s jeho destination adresářem
+- Retrieve vždy posílá příkazy `remv` pro položky k smazání
+- Save bez `--delete` příkazy `remv` ignoruje
+- Save s `--delete` příkazy `remv` vykoná
+
+### Metadata se posílají vždy
+
+I pro nezměněné soubory (kde se nepřenášejí datové bloky) se posílá příkaz `meta` s metadaty. Důvody:
+
+- Umožňuje aktualizovat permissions/timestamps i bez změny obsahu souboru
+- Uživatel může chtít `save --times --perms` pro synchronizaci metadat
+- Jednodušší logika (není potřeba porovnávat metadata na obou stranách)
+- Bandwidth overhead je akceptovatelný (~60-70 bytes na soubor)
+
+Pro 1M souborů je overhead ~60 MB, což je zanedbatelné oproti typickým přenosům VM images nebo databází.
 
 ### On-demand kontrola source místo manifestu
 
@@ -802,6 +824,11 @@ Symlinky se nepřenášejí jako symlinky, ale jako jejich cílový obsah:
 
 ### Rozlišení recursive vs. single-file režimu
 
+Blockcopy má dva rovnocenné režimy (oba jsou "first-class citizens"):
+
+1. **Single-file režim** - primární use case pro kopírování LVM volumes, VM images, block devices
+2. **Recursive režim** - pro kopírování adresářových stromů (databázové datadiry apod.)
+
 Receiver může rozlišit režim podle prvního příkazu:
 - `'dire'` → recursive režim (první příkaz je vždy root adresář s `path_len=0`)
 - `'Hash'` → single-file režim
@@ -810,6 +837,8 @@ Toto umožňuje:
 - Auto-detekci režimu bez nutnosti explicitního flags
 - Root adresář je legitimní položka - jeho metadata se také přenesou
 - I prázdný dest adresář pošle `'dire'` s prázdnou cestou, takže recursive režim je vždy rozpoznatelný
+
+**Poznámka:** Recursive režim není "nová verze" protokolu - je to alternativní režim. Oba režimy budou podporovány dlouhodobě.
 
 ## Budoucí rozšíření (mimo scope tohoto plánu)
 
