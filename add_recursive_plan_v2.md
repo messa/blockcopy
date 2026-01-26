@@ -236,43 +236,43 @@ done
 ### Fáze retrieve
 
 1. Pokud `--recursive`:
-   a. Vytvořit prázdnou množinu seen_paths a seznam `to_delete`
+   a. Vytvořit prázdnou množinu `seen_paths` a seznam `to_delete`
    b. Číst příkazy ze stdin (checksum výstup)
-   c. Pro každý 'file' z dest:
-      - Přidat cestu do seen_paths
+   c. Pro každý `'file'` z dest:
+      - Přidat cestu do `seen_paths`
       - Zkontrolovat on-demand, jestli soubor existuje na source
-      - Pokud existuje: porovnat hashe, poslat 'file' + změněné data bloky + meta
-      - Pokud neexistuje na source: přidat cestu do to_delete
-   d. Pro každý `'dire'` z dest:
-      - Přidat cestu do seen_paths
-      - Zkontrolovat on-demand, jestli adresář existuje na source
-      - Pokud existuje: poslat `'dire'` + dmet
+      - Pokud existuje: porovnat hashe, poslat `'file'` + změněné data bloky + `'meta'`
       - Pokud neexistuje na source: přidat cestu do `to_delete`
-   e. Po 'done' ze stdin:
-      - Projít source adresář (followlinks=True)
-      - Pro každou položku která není v seen_paths: poslat jako novou
-      - Pokud `--delete`: poslat 'remv' pro položky v `to_delete`
+   d. Pro každý `'dire'` z dest:
+      - Přidat cestu do `seen_paths`
+      - Zkontrolovat on-demand, jestli adresář existuje na source
+      - Pokud existuje: poslat `'dire'` + `'dmet'`
+      - Pokud neexistuje na source: přidat cestu do `to_delete`
+   e. Po `'done'` ze stdin:
+      - Projít source adresář (`followlinks=True`)
+      - Pro každou položku která není v `seen_paths`: poslat jako novou
+      - Pokud `--delete`: poslat `'remv'` pro položky v `to_delete`
    f. Odeslat `'done'`
 2. Jinak (původní chování):
    - Zpracovat jako dosud
 
 ### Fáze save
 
-1. Pokud --recursive:
-   a. Vytvořit prázdný seznam pending_dir_metadata
+1. Pokud `--recursive`:
+   a. Vytvořit prázdný seznam `pending_dir_metadata`
    b. Zpracovat příkazy ze stdin:
-      - Pro každý 'dire':
+      - Pro každý `'dire'`:
         - Vytvořit adresář (pokud neexistuje)
-        - Uložit metadata z 'dmet' do pending_dir_metadata
-      - Pro každý 'file':
+        - Uložit metadata z `'dmet'` do `pending_dir_metadata`
+      - Pro každý `'file'`:
         - Otevřít/vytvořit soubor
-        - Zapsat všechny přijaté 'data' bloky
-        - Truncate na velikost z 'meta.total_size'
-        - Aplikovat metadata z 'meta'
-      - Pro každý 'remv':
+        - Zapsat všechny přijaté `'data'` bloky
+        - Truncate na velikost z `'meta'.total_size`
+        - Aplikovat metadata z `'meta'`
+      - Pro každý `'remv'`:
         - Smazat soubor nebo adresář (rekurzivně)
-   c. Po 'done':
-      - Aplikovat metadata adresářů z pending_dir_metadata (v opačném pořadí - potomci před rodiči)
+   c. Po `'done'`:
+      - Aplikovat metadata adresářů z `pending_dir_metadata` (v opačném pořadí - potomci před rodiči)
    d. Skončit
 2. Jinak (původní chování):
    - Zpracovat jako dosud
