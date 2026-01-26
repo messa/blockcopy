@@ -3,7 +3,12 @@ from subprocess import Popen, PIPE, DEVNULL
 from sys import executable
 
 
-def test_version(tmp_path, script_path, terminate_process):
+def test_version_module_attribute():
+    import blockcopy
+    assert blockcopy.__version__ == '0.0.3'
+
+
+def test_version_cli_option(tmp_path, script_path, terminate_process):
     cmd1 = [executable, script_path, '--version']
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
