@@ -1,6 +1,5 @@
 # Plán: Přidat volby pro zachování metadata k příkazu save
 
-
 ## Přehled
 
 Přidat volby `--times` (`-t`), `--perms` (`-p`), `--owner` (`-o`), `--group` (`-g`) k příkazu `save`, které způsobí nastavení příslušných metadata cílového souboru na hodnoty zdrojového souboru.
@@ -75,14 +74,8 @@ with open(file_path, 'rb') as f:
     stat_result = os.stat(f.fileno())
 
 # Get owner/group names (may fail if uid/gid doesn't exist)
-try:
-    owner_name = getpwuid(stat_result.st_uid).pw_name.encode('utf-8')
-except KeyError:
-    owner_name = b''
-try:
-    group_name = getgrgid(stat_result.st_gid).gr_name.encode('utf-8')
-except KeyError:
-    group_name = b''
+owner_name = get_user_name_by_uid(stat_result.st_uid).encode('utf-8')
+group_name = get_group_name_by_gid(stat_result.st_gid).encode('utf-8')
 
 with block_output_stream_lock:
     block_output_stream.write(b'Meta')
@@ -195,20 +188,22 @@ mtime_ns = int(environ.get('BLOCKCOPY_OVERRIDE_MTIME_NS', stat_result.st_mtime_n
 mode = int(environ.get('BLOCKCOPY_OVERRIDE_MODE', stat_result.st_mode))
 uid = int(environ.get('BLOCKCOPY_OVERRIDE_UID', stat_result.st_uid))
 gid = int(environ.get('BLOCKCOPY_OVERRIDE_GID', stat_result.st_gid))
-owner_name = environ.get('BLOCKCOPY_OVERRIDE_OWNER', None)
-group_name = environ.get('BLOCKCOPY_OVERRIDE_GROUP', None)
+owner_name = environ.get('BLOCKCOPY_OVERRIDE_OWNER', get_user_name_by_uid(stat_result.st_uid))
+group_name = environ.get('BLOCKCOPY_OVERRIDE_GROUP', get_group_name_by_gid(stat_result.st_gid))
+```
 
-if owner_name is None:
+```python
+def get_user_name_by_uid(uid):
     try:
-        owner_name = getpwuid(stat_result.st_uid).pw_name
+        return getpwuid(uid).pw_name
     except KeyError:
-        owner_name = ''
+        return ''
 
-if group_name is None:
+def get_group_name_by_gid(gid):
     try:
-        group_name = getgrgid(stat_result.st_gid).gr_name
+        return getgrgid(gid).gr_name
     except KeyError:
-        group_name = ''
+        return ''
 ```
 
 ## Změny v `tests/test_copy.py`
