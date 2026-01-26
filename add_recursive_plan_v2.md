@@ -15,13 +15,7 @@ Tento dokument popisuje návrh implementace volby `--recursive` pro nástroj blo
 ### Společné konstanty
 
 ```python
-# Typy souborových položek
-FTYPE_FILE    = 0x01  # běžný soubor
-FTYPE_DIR     = 0x02  # adresář
-FTYPE_SYMLINK = 0x03  # symbolický odkaz
-FTYPE_ABSENT  = 0x00  # neexistuje (pro smazání)
-
-# Příznaky akcí
+# Příznaky akcí (používané v protokolu retrieve → save)
 FLAG_UNCHANGED = 0x00  # beze změny
 FLAG_NEW       = 0x01  # nový soubor/adresář
 FLAG_MODIFIED  = 0x02  # změněný obsah
@@ -29,25 +23,24 @@ FLAG_DELETE    = 0x04  # smazat (existuje na dest, neexistuje na source)
 FLAG_META_ONLY = 0x08  # změnit pouze metadata
 ```
 
+**Poznámka k symlinkům:** Symlinky se následují (followlinks=True). Přenáší se obsah cílového souboru/adresáře, nikoliv samotný symlink. Tím se zjednodušuje protokol a chování je konzistentní.
+
 ### Protokol checksum → retrieve
 
-Checksum projde cílový adresář a pro každou položku odešle informace:
+Checksum projde cílový adresář a pro každou položku odešle informace. Používají se dva příkazy podle typu položky:
 
-#### Příkaz `entr` (entry) - začátek položky
+#### Příkaz `file` - soubor
 
 ```
-entr           (4 bytes)  - command identifier
+file           (4 bytes)  - command identifier
 path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
 path           (N bytes)  - relativní cesta (UTF-8)
-file_type      (1 byte)   - typ položky (FTYPE_*)
-file_size      (8 bytes)  - velikost souboru (big-endian), 0 pro adresáře/symlinky
-link_target_len (4 bytes) - délka cíle symlinku (0 pokud není symlink)
-link_target    (N bytes)  - cíl symlinku (UTF-8), prázdné pokud není symlink
+file_size      (8 bytes)  - velikost souboru (big-endian)
 ```
 
-#### Příkaz `Hash` (beze změny) - hash bloku
+Po příkazu `file` následují hashe všech bloků (pokud `file_size > 0`):
 
-Pouze pro běžné soubory s `file_size > 0`:
+#### Příkaz `Hash` (beze změny) - hash bloku
 
 ```
 Hash           (4 bytes)  - command identifier
@@ -56,11 +49,23 @@ block_size     (4 bytes)  - velikost bloku (big-endian)
 block_hash     (64 bytes) - SHA3-512 digest
 ```
 
-#### Příkaz `eent` (end entry) - konec položky
+Po posledním hashi následuje konec souboru:
+
+#### Příkaz `endf` (end file) - konec souboru
 
 ```
-eent           (4 bytes)  - command identifier
+endf           (4 bytes)  - command identifier
 ```
+
+#### Příkaz `dire` - adresář
+
+```
+dire           (4 bytes)  - command identifier
+path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
+path           (N bytes)  - relativní cesta (UTF-8)
+```
+
+Adresáře nemají žádná následující data ani ukončovací příkaz.
 
 #### Příkaz `done` (beze změny) - konec celého přenosu
 
@@ -71,37 +76,33 @@ done           (4 bytes)  - command identifier
 #### Příklad toku dat (checksum)
 
 ```
-entr + "src/main.py" + FTYPE_FILE + 1024 + 0 + ""
+file + "src/main.py" + 1024
   Hash + 0 + 131072 + <hash1>
   ... (další hashe pokud je soubor větší)
-eent
-entr + "src/utils/" + FTYPE_DIR + 0 + 0 + ""
-eent
-entr + "src/utils/helper.py" + FTYPE_FILE + 512 + 0 + ""
+endf
+dire + "src/utils/"
+file + "src/utils/helper.py" + 512
   Hash + 0 + 512 + <hash2>
-eent
-entr + "link_to_readme" + FTYPE_SYMLINK + 0 + 9 + "README.md"
-eent
+endf
 done
 ```
 
 ### Protokol retrieve → save
 
-Retrieve čte hashe ze stdin, porovnává se zdrojovými soubory a odesílá změny:
+Retrieve čte hashe ze stdin, porovnává se zdrojovými soubory a odesílá změny. Podobně jako checksum používá oddělené příkazy pro soubory a adresáře:
 
-#### Příkaz `item` - začátek položky
+#### Příkaz `file` - soubor
 
 ```
-item           (4 bytes)  - command identifier
+file           (4 bytes)  - command identifier
 path_len       (4 bytes)  - délka cesty v bajtech
 path           (N bytes)  - relativní cesta (UTF-8)
-file_type      (1 byte)   - typ položky (FTYPE_*)
 flags          (1 byte)   - příznaky akce (FLAG_*)
 ```
 
-#### Příkaz `data` (beze změny) - datový blok
+Po příkazu `file` následují datové bloky (pokud `FLAG_NEW` nebo `FLAG_MODIFIED`):
 
-Pouze pro soubory s `FLAG_NEW` nebo `FLAG_MODIFIED`:
+#### Příkaz `data` (beze změny) - datový blok
 
 ```
 data           (4 bytes)  - command identifier
@@ -119,9 +120,7 @@ block_size     (4 bytes)  - velikost komprimovaných dat
 block_data     (N bytes)  - LZMA komprimovaná data
 ```
 
-#### Příkaz `meta` - metadata položky
-
-Rozšířeno o podporu různých typů:
+#### Příkaz `meta` - metadata souboru
 
 ```
 meta           (4 bytes)  - command identifier
@@ -135,15 +134,52 @@ owner_name     (N bytes)  - jméno vlastníka (UTF-8)
 group_name_len (2 bytes)  - délka jména skupiny
 group_name     (N bytes)  - jméno skupiny (UTF-8)
 total_size     (8 bytes)  - velikost souboru
-link_target_len (4 bytes) - délka cíle symlinku (0 pokud není symlink)
-link_target    (N bytes)  - cíl symlinku
 end            (3 bytes)  - literal "end" marker
 ```
 
-#### Příkaz `eoit` (end of item) - konec položky
+#### Příkaz `endf` (end file) - konec souboru
 
 ```
-eoit           (4 bytes)  - command identifier
+endf           (4 bytes)  - command identifier
+```
+
+#### Příkaz `dire` - adresář
+
+```
+dire           (4 bytes)  - command identifier
+path_len       (4 bytes)  - délka cesty v bajtech
+path           (N bytes)  - relativní cesta (UTF-8)
+flags          (1 byte)   - příznaky akce (FLAG_*)
+```
+
+Pro adresáře následuje pouze metadata (pokud `FLAG_NEW` nebo `FLAG_META_ONLY`):
+
+#### Příkaz `dmet` - metadata adresáře
+
+```
+dmet           (4 bytes)  - command identifier
+atime_ns       (8 bytes)  - access time (nanoseconds, signed)
+mtime_ns       (8 bytes)  - modification time (nanoseconds, signed)
+mode           (4 bytes)  - directory mode/permissions
+uid            (4 bytes)  - user id
+gid            (4 bytes)  - group id
+owner_name_len (2 bytes)  - délka jména vlastníka
+owner_name     (N bytes)  - jméno vlastníka (UTF-8)
+group_name_len (2 bytes)  - délka jména skupiny
+group_name     (N bytes)  - jméno skupiny (UTF-8)
+end            (3 bytes)  - literal "end" marker
+```
+
+Adresáře nemají ukončovací příkaz (metadata jsou volitelná a příkaz `dmet` je ukončuje).
+
+#### Příkaz `remv` - smazání položky
+
+Pro mazání souborů i adresářů (s `--delete`):
+
+```
+remv           (4 bytes)  - command identifier
+path_len       (4 bytes)  - délka cesty v bajtech
+path           (N bytes)  - relativní cesta (UTF-8)
 ```
 
 #### Příkaz `done` (beze změny) - konec přenosu
@@ -156,30 +192,35 @@ done           (4 bytes)  - command identifier
 
 ```
 # Nový soubor
-item + "src/new_file.py" + FTYPE_FILE + FLAG_NEW
+file + "src/new_file.py" + FLAG_NEW
   data + 0 + 1024 + <data>
   meta + <metadata>
-eoit
+endf
 
 # Změněný soubor (jen některé bloky)
-item + "src/main.py" + FTYPE_FILE + FLAG_MODIFIED
+file + "src/main.py" + FLAG_MODIFIED
   data + 131072 + 512 + <changed_block>
   meta + <metadata>
-eoit
+endf
 
-# Beze změny (jen metadata se mohou aktualizovat)
-item + "src/utils/helper.py" + FTYPE_FILE + FLAG_UNCHANGED
+# Beze změny (přeskočí se nebo jen meta update)
+file + "src/utils/helper.py" + FLAG_UNCHANGED
   meta + <metadata>
-eoit
+endf
 
 # Nový adresář
-item + "src/new_dir/" + FTYPE_DIR + FLAG_NEW
-  meta + <metadata>
-eoit
+dire + "src/new_dir/" + FLAG_NEW
+  dmet + <metadata>
+
+# Existující adresář beze změny (metadata update)
+dire + "src/utils/" + FLAG_META_ONLY
+  dmet + <metadata>
 
 # Smazat soubor (existuje na dest, ne na source)
-item + "src/old_file.py" + FTYPE_ABSENT + FLAG_DELETE
-eoit
+remv + "src/old_file.py"
+
+# Smazat adresář
+remv + "src/old_dir/"
 
 done
 ```
@@ -190,12 +231,11 @@ done
 
 ```
 1. Pokud --recursive:
-   a. Rekurzivně projít cílový adresář
+   a. Rekurzivně projít cílový adresář (followlinks=True)
    b. Seřadit položky podle cesty (abecedně)
    c. Pro každou položku:
-      - Odeslat příkaz 'entr' s informacemi o položce
-      - Pokud je to soubor, odeslat hashe všech bloků
-      - Odeslat příkaz 'eent'
+      - Adresář: odeslat příkaz 'dire'
+      - Soubor: odeslat příkaz 'file', pak hashe všech bloků, pak 'endf'
    d. Odeslat příkaz 'done'
 2. Jinak (původní chování):
    - Zpracovat jako dosud (jeden soubor)
@@ -205,16 +245,21 @@ done
 
 ```
 1. Pokud --recursive:
-   a. Načíst manifest položek ze source adresáře
+   a. Načíst manifest položek ze source adresáře (followlinks=True)
    b. Číst příkazy ze stdin (checksum výstup)
-   c. Pro každý 'entr':
-      - Najít odpovídající source položku
-      - Porovnat typ a obsah
-      - Určit akci (FLAG_*)
-   d. Po 'done' ze stdin:
+   c. Pro každý 'file':
+      - Najít odpovídající source soubor
+      - Porovnat hashe bloků
+      - Určit akci (FLAG_NEW, FLAG_MODIFIED, FLAG_UNCHANGED)
+   d. Pro každý 'dire':
+      - Najít odpovídající source adresář
+      - Určit akci
+   e. Po 'done' ze stdin:
       - Identifikovat source položky bez dest protějšku (nové)
-   e. Odeslat všechny položky s příslušnými akcemi
-   f. Odeslat 'done'
+      - Identifikovat dest položky bez source protějšku (k smazání)
+   f. Odeslat všechny položky s příslušnými akcemi
+   g. Odeslat příkazy 'remv' pro položky k smazání
+   h. Odeslat 'done'
 2. Jinak (původní chování):
    - Zpracovat jako dosud
 ```
@@ -224,15 +269,17 @@ done
 ```
 1. Pokud --recursive:
    a. Zpracovat příkazy ze stdin
-   b. Pro každý 'item':
-      - FLAG_NEW + FTYPE_DIR: vytvořit adresář
-      - FLAG_NEW + FTYPE_FILE: vytvořit soubor, zapsat data
-      - FLAG_NEW + FTYPE_SYMLINK: vytvořit symlink
+   b. Pro každý 'dire':
+      - FLAG_NEW: vytvořit adresář
+      - Aplikovat metadata z 'dmet' (pokud následuje)
+   c. Pro každý 'file':
+      - FLAG_NEW: vytvořit soubor, zapsat data
       - FLAG_MODIFIED: zapsat změněné bloky
-      - FLAG_DELETE: smazat položku
-      - FLAG_META_ONLY: aktualizovat pouze metadata
-   c. Aplikovat metadata podle --times, --perms, --owner, --group
-   d. Po 'done' skončit
+      - Aplikovat metadata z 'meta'
+   d. Pro každý 'remv':
+      - Smazat soubor nebo adresář (rekurzivně)
+   e. Aplikovat metadata podle --times, --perms, --owner, --group
+   f. Po 'done' skončit
 2. Jinak (původní chování):
    - Zpracovat jako dosud
 ```
@@ -271,28 +318,33 @@ Poznámka: Implementace `--exclude` může být přidána v budoucí verzi.
 
 ### Prázdné adresáře
 
-- Přenášet i prázdné adresáře jako `FTYPE_DIR` položky
+- Přenášet i prázdné adresáře pomocí příkazu `dire`
 - Save vytvoří adresář pomocí `os.makedirs(exist_ok=True)`
 
 ### Symlinky
 
-- Přenášet jako `FTYPE_SYMLINK` s cílem odkazu
-- Na dest se vytvoří pomocí `os.symlink()`
-- Nesledovat symlinky při procházení (použít `os.walk(followlinks=False)`)
+Symlinky se následují (followlinks=True při os.walk). Toto znamená:
+
+- Symlink na soubor: přenese se obsah cílového souboru pod cestou symlinku
+- Symlink na adresář: rekurzivně se projde cílový adresář
+- Broken symlink: přeskočí se s varováním na stderr (cíl neexistuje)
+
+Výhody tohoto přístupu:
+- Jednodušší protokol (není potřeba FTYPE_SYMLINK)
+- Destination dostane skutečná data, ne závislost na lokálních cestách
+- Konzistentní chování nezávislé na umístění source
 
 ### Změna typu položky
 
-Pokud se typ položky změní (soubor → adresář, symlink → soubor, atd.):
+Pokud se typ položky změní (soubor → adresář nebo adresář → soubor):
 
-1. Smazat původní položku na dest
-2. Vytvořit novou položku správného typu
-
-V protokolu: poslat `FLAG_DELETE` pro starou položku, pak `FLAG_NEW` pro novou.
+1. Poslat příkaz `remv` pro starou položku
+2. Poslat příkaz `file` nebo `dire` s `FLAG_NEW` pro novou položku
 
 ### Soubory s nulovou velikostí
 
 - Přenášet jako běžné soubory bez hashů
-- `entr` bude mít `file_size = 0`
+- `file` bude mít `file_size = 0`
 - Nepošlou se žádné `Hash` příkazy
 - V retrieve se pošle `FLAG_NEW` nebo `FLAG_UNCHANGED` podle existence
 
@@ -342,35 +394,54 @@ Jednověláknové zpracování (jako dosud) - zápis musí být sekvenční.
 ### Nové funkce
 
 ```python
-def walk_directory(path: Path) -> Iterator[Tuple[Path, int, int, str]]:
+def walk_directory(path: Path, followlinks: bool = True) -> Iterator[Tuple[Path, bool, int]]:
     """
     Rekurzivně projde adresář a vrátí informace o položkách.
-    Yields: (relativní_cesta, typ, velikost, link_target)
+    Yields: (relativní_cesta, is_dir, velikost)
+
+    Položky jsou seřazené abecedně podle cesty.
+    Symlinky se následují (followlinks=True).
     """
 
 def read_directory_manifest(path: Path) -> Dict[str, DirEntry]:
     """
     Načte manifest zdrojového adresáře do paměti.
+    Klíč je relativní cesta, hodnota je DirEntry.
     """
 
-def send_entry_header(out: IO, path: str, file_type: int, size: int, link_target: str):
+def send_file_header(out: IO, path: str, size: int):
     """
-    Odešle příkaz 'entr'.
-    """
-
-def send_end_entry(out: IO):
-    """
-    Odešle příkaz 'eent'.
+    Odešle příkaz 'file' (checksum → retrieve).
     """
 
-def send_item_header(out: IO, path: str, file_type: int, flags: int):
+def send_file_header_with_flags(out: IO, path: str, flags: int):
     """
-    Odešle příkaz 'item'.
+    Odešle příkaz 'file' (retrieve → save).
     """
 
-def send_end_item(out: IO):
+def send_end_file(out: IO):
     """
-    Odešle příkaz 'eoit'.
+    Odešle příkaz 'endf'.
+    """
+
+def send_dire_header(out: IO, path: str):
+    """
+    Odešle příkaz 'dire' (checksum → retrieve).
+    """
+
+def send_dire_header_with_flags(out: IO, path: str, flags: int):
+    """
+    Odešle příkaz 'dire' (retrieve → save).
+    """
+
+def send_dire_meta(out: IO, ...):
+    """
+    Odešle příkaz 'dmet' s metadaty adresáře.
+    """
+
+def send_remove(out: IO, path: str):
+    """
+    Odešle příkaz 'remv'.
     """
 ```
 
@@ -388,9 +459,8 @@ def send_end_item(out: IO):
 class DirEntry:
     """Reprezentuje položku v adresáři."""
     path: str           # relativní cesta
-    file_type: int      # FTYPE_*
-    size: int           # velikost (0 pro adresáře/symlinky)
-    link_target: str    # cíl symlinku (prázdný pro ostatní)
+    is_dir: bool        # True pro adresář, False pro soubor
+    size: int           # velikost (0 pro adresáře)
     mode: int
     uid: int
     gid: int
@@ -405,26 +475,38 @@ class DirEntry:
 #### test_recursive_protocol.py
 
 ```python
-def test_entry_command_encoding():
-    """Test správného kódování příkazu 'entr'."""
+def test_file_command_encoding():
+    """Test správného kódování příkazu 'file' (checksum)."""
 
-def test_entry_command_decoding():
-    """Test správného dekódování příkazu 'entr'."""
+def test_file_command_decoding():
+    """Test správného dekódování příkazu 'file'."""
 
-def test_item_command_encoding():
-    """Test správného kódování příkazu 'item'."""
+def test_dire_command_encoding():
+    """Test správného kódování příkazu 'dire'."""
 
-def test_item_command_decoding():
-    """Test správného dekódování příkazu 'item'."""
+def test_dire_command_decoding():
+    """Test správného dekódování příkazu 'dire'."""
 
-def test_extended_meta_encoding():
-    """Test kódování rozšířeného příkazu 'meta' se symlink target."""
+def test_file_with_flags_encoding():
+    """Test kódování příkazu 'file' s příznaky (retrieve)."""
+
+def test_remv_command_encoding():
+    """Test kódování příkazu 'remv'."""
+
+def test_meta_encoding():
+    """Test kódování příkazu 'meta'."""
+
+def test_dmet_encoding():
+    """Test kódování příkazu 'dmet'."""
 
 def test_walk_directory_order():
     """Test že walk_directory vrací položky v abecedním pořadí."""
 
 def test_walk_directory_types():
-    """Test správné detekce typů (soubor, adresář, symlink)."""
+    """Test správné detekce typů (soubor, adresář)."""
+
+def test_walk_directory_follows_symlinks():
+    """Test že walk_directory následuje symlinky."""
 ```
 
 ### Integrační testy
@@ -478,12 +560,17 @@ def test_recursive_copy_empty_directory():
     Test kopie prázdných adresářů.
     """
 
-def test_recursive_copy_symlinks():
+def test_recursive_copy_symlinks_followed():
     """
-    Test kopie symbolických odkazů.
-    - Absolutní symlink
-    - Relativní symlink
-    - Broken symlink
+    Test že symlinky jsou následovány.
+    - Symlink na soubor: přenese se obsah
+    - Symlink na adresář: rekurzivně se projde obsah
+    - Ověření že dest obsahuje skutečná data, ne symlinky
+    """
+
+def test_recursive_copy_broken_symlink_skipped():
+    """
+    Test že broken symlinky jsou přeskočeny s varováním.
     """
 
 def test_recursive_copy_type_change():
@@ -491,7 +578,6 @@ def test_recursive_copy_type_change():
     Test změny typu položky.
     - Soubor → adresář
     - Adresář → soubor
-    - Soubor → symlink
     """
 
 def test_recursive_copy_permissions():
@@ -572,9 +658,9 @@ def test_recursive_permission_denied():
     Test chování při chybě přístupu k souboru.
     """
 
-def test_recursive_broken_symlink():
+def test_recursive_broken_symlink_warning():
     """
-    Test kopie nefunkčního symlinku.
+    Test že nefunkční symlink vypíše varování a je přeskočen.
     """
 
 def test_recursive_interrupted():
@@ -592,14 +678,14 @@ def test_recursive_disk_full():
 
 ### Fáze 1: Protokol a základní struktury
 
-1. Definovat nové příkazy protokolu (konstanty)
+1. Definovat nové příkazy protokolu (`file`, `dire`, `endf`, `dmet`, `remv`)
 2. Implementovat `DirEntry` dataclass
 3. Implementovat funkce pro kódování/dekódování nových příkazů
 4. Napsat jednotkové testy protokolu
 
 ### Fáze 2: Checksum s --recursive
 
-1. Implementovat `walk_directory()`
+1. Implementovat `walk_directory()` s followlinks=True
 2. Rozšířit `main_checksum()` o větev pro `--recursive`
 3. Zachovat existující paralelizaci pro hashování
 4. Napsat testy pro checksum fázi
@@ -608,15 +694,17 @@ def test_recursive_disk_full():
 
 1. Implementovat `read_directory_manifest()`
 2. Rozšířit `main_retrieve()` o větev pro `--recursive`
-3. Implementovat porovnávání a určení akcí
-4. Napsat testy pro retrieve fázi
+3. Implementovat porovnávání a určení akcí (FLAG_*)
+4. Implementovat generování příkazů `remv` pro smazání
+5. Napsat testy pro retrieve fázi
 
 ### Fáze 4: Save s --recursive
 
 1. Rozšířit `main_save()` o větev pro `--recursive`
-2. Implementovat vytváření adresářů a symlinků
-3. Implementovat volbu `--delete`
-4. Napsat testy pro save fázi
+2. Implementovat vytváření adresářů
+3. Implementovat zpracování příkazu `remv`
+4. Implementovat volbu `--delete`
+5. Napsat testy pro save fázi
 
 ### Fáze 5: Integrační testy a ladění
 
@@ -650,7 +738,8 @@ def test_recursive_disk_full():
 2. `--dry-run` pro simulaci
 3. `--checksum` pro vynucení porovnání hashů i při shodné velikosti/mtime
 4. `--ignore-existing` pro přeskočení existujících souborů
-5. Podpora rozšířených atributů (xattr)
-6. Podpora ACL
-7. Podpora sparse souborů
-8. Obousměrná synchronizace (mimo scope - komplikuje jednosměrný tok)
+5. `--no-dereference` pro kopírování symlinků jako symlinků (místo následování)
+6. Podpora rozšířených atributů (xattr)
+7. Podpora ACL
+8. Podpora sparse souborů
+9. Obousměrná synchronizace (mimo scope - komplikuje jednosměrný tok)
