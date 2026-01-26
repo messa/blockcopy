@@ -96,3 +96,4 @@ When releasing a new version, update the version string in these locations:
 1. `blockcopy.py` - `__version__` variable
 2. `pyproject.toml` - `version` field in `[project]` section
 3. `README.md` - download URLs contain the version tag (e.g. `v0.0.2`)
+4. `tests/test_version.py` - version assertions in tests
