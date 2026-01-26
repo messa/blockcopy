@@ -1,4 +1,4 @@
-name: Pytest
+name: Test
 
 on: [push, pull_request]
 
@@ -49,4 +49,9 @@ jobs:
         python -m pytest -v --tb=native tests \
           --doctest-modules \
           --junitxml=junit/test-results.xml \
-          --cov=com --cov-report=xml --cov-report=html
+          --cov=blockcopy --cov-report=xml --cov-report=html
+
+    - name: Upload coverage reports to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        token: ${{ secrets.CODECOV_TOKEN }}
