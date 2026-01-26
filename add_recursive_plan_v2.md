@@ -715,6 +715,56 @@ def test_recursive_disk_full():
 - LZMA komprese výrazně sníží přenos dat
 - Zvážit volbu `--compress-level` pro LZMA
 
+## Designová rozhodnutí
+
+Tato sekce dokumentuje klíčová rozhodnutí učiněná během návrhu a jejich zdůvodnění.
+
+### Oddělené příkazy `file` a `dire` místo obecného `entr`
+
+Původní návrh používal obecný příkaz `entr` (entry) s polem typu. Oddělené příkazy jsou:
+- Čitelnější v dokumentaci i při debugování
+- Jednodušší na parsování (není potřeba switch na typ)
+- Explicitnější o tom, co následuje (hashe pro soubory, nic pro adresáře)
+
+### Žádné flags v protokolu retrieve → save
+
+Původní návrh obsahoval FLAG_NEW, FLAG_MODIFIED, FLAG_UNCHANGED pro indikaci akce. Tyto flags byly odstraněny, protože save může inferovat akci z přijatých dat:
+- Přišla `data` bloky → zapsat na dané pozice
+- Přišlo jen `meta` bez `data` → soubor beze změny, pouze aktualizovat metadata
+- Přišlo `remv` → smazat položku
+
+Toto zjednodušuje protokol a eliminuje redundanci.
+
+### Umístění `--delete` na retrieve (ne na save)
+
+Volba `--delete` určuje, zda se mají mazat položky chybějící na source. Retrieve je správné místo, protože:
+- Retrieve zná stav source adresáře
+- Retrieve generuje příkazy `remv` pro položky k smazání
+- Save pouze vykonává přijaté příkazy
+
+### On-demand kontrola source místo manifestu
+
+Původní návrh načítal celý manifest source adresáře do paměti. On-demand přístup:
+- Kontroluje existenci souborů/adresářů na source při zpracování každé položky z dest
+- Po zpracování všech položek z dest projde source a najde nové položky
+- Výhoda: nižší paměťové nároky pro velké adresáře
+- Nevýhoda: více syscalls (stat pro každou položku)
+
+### Checksum posílá `dire` pro adresáře
+
+I když adresáře nemají hashe, checksum posílá `dire` příkazy protože:
+- Umožňuje detekci prázdných adresářů (které by jinak nebyly vidět)
+- Umožňuje detekci adresářů, které na source neexistují (pro `--delete`)
+- Retrieve potřebuje vědět o všech položkách na dest
+
+### Symlinky se následují (followlinks=True)
+
+Symlinky se nepřenášejí jako symlinky, ale jako jejich cílový obsah:
+- Jednodušší protokol (není potřeba typ SYMLINK)
+- Destination dostane skutečná data, ne závislost na lokálních cestách source
+- Konzistentní chování nezávislé na umístění source
+- Budoucí rozšíření `--no-dereference` může přidat podporu pro kopírování symlinků
+
 ## Budoucí rozšíření (mimo scope tohoto plánu)
 
 1. `--exclude` / `--include` vzory
