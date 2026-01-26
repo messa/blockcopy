@@ -237,6 +237,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
             show_progress_total_size = None
             show_progress_last_output_time = monotonic()
             show_progress_last_output_pct = 0
+            show_progress_last_output_pos = start_offset
             try:
                 with ExitStack() as stack:
                     if file_path == '-':
@@ -304,11 +305,16 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                         if show_progress:
                             show_progress_pct = 100 * (block_pos - start_offset) / show_progress_total_size
                             if monotonic() - show_progress_last_output_time >= 60 or show_progress_pct - show_progress_last_output_pct >= 5:
-                                show_progress_last_output_time = monotonic()
+                                now = monotonic()
+                                elapsed = now - show_progress_last_output_time
+                                bytes_since_last = block_pos - show_progress_last_output_pos
+                                speed_mb_s = (bytes_since_last / (1024 * 1024)) / elapsed if elapsed > 0 else 0
+                                show_progress_last_output_time = now
                                 show_progress_last_output_pct = show_progress_pct
+                                show_progress_last_output_pos = block_pos
                                 print(
                                     f'Checksum progress: {block_pos/2**30:7.2f} GB / {show_progress_total_size/2**30:.2f} GB'
-                                    f' ({show_progress_pct:5.2f}%)',
+                                    f' ({show_progress_pct:5.2f}%) {speed_mb_s:7.1f} MB/s',
                                     file=stderr,
                                     flush=True)
 
