@@ -184,15 +184,95 @@ if preserve_times:
 
 Poznámka: `utime` se aplikuje poslední, aby ostatní operace nepřepsaly mtime.
 
+## Override metadata přes env proměnné (pro testy)
+
+V `do_retrieve` přidat podporu pro override hodnot přes env proměnné. To umožní v testech nastavit pevné hodnoty a zachovat stávající přesné byte asserty.
+
+```python
+# V do_retrieve, po získání stat_result:
+atime_ns = int(environ.get('BLOCKCOPY_OVERRIDE_ATIME_NS', stat_result.st_atime_ns))
+mtime_ns = int(environ.get('BLOCKCOPY_OVERRIDE_MTIME_NS', stat_result.st_mtime_ns))
+mode = int(environ.get('BLOCKCOPY_OVERRIDE_MODE', stat_result.st_mode))
+uid = int(environ.get('BLOCKCOPY_OVERRIDE_UID', stat_result.st_uid))
+gid = int(environ.get('BLOCKCOPY_OVERRIDE_GID', stat_result.st_gid))
+owner_name = environ.get('BLOCKCOPY_OVERRIDE_OWNER', None)
+group_name = environ.get('BLOCKCOPY_OVERRIDE_GROUP', None)
+
+if owner_name is None:
+    try:
+        owner_name = getpwuid(stat_result.st_uid).pw_name
+    except KeyError:
+        owner_name = ''
+
+if group_name is None:
+    try:
+        group_name = getgrgid(stat_result.st_gid).gr_name
+    except KeyError:
+        group_name = ''
+```
+
 ## Změny v `tests/test_copy.py`
 
-Přidat nový test s parametrizací pro kombinace metadata voleb:
+### Úprava existujících testů
+
+Testy s přesnými byte asserty (např. `test_copy_tiny`) přidat env override, aby výstup byl deterministický:
+
+```python
+def test_copy_tiny(tmp_path, script_path):
+    # ... setup ...
+
+    env = {
+        **environ,
+        'BLOCKCOPY_OVERRIDE_ATIME_NS': '0',
+        'BLOCKCOPY_OVERRIDE_MTIME_NS': '0',
+        'BLOCKCOPY_OVERRIDE_MODE': '33188',  # 0o100644
+        'BLOCKCOPY_OVERRIDE_UID': '1000',
+        'BLOCKCOPY_OVERRIDE_GID': '1000',
+        'BLOCKCOPY_OVERRIDE_OWNER': 'testuser',
+        'BLOCKCOPY_OVERRIDE_GROUP': 'testgroup',
+    }
+
+    # ... Popen calls with env=env ...
+
+    # Přesný byte assert nyní funguje, protože Meta má deterministické hodnoty
+    assert p2_output == b'data...' + expected_meta_bytes + b'Done...'
+```
+
+### Nové testy pro metadata
 
 ```python
 @mark.parametrize('use_times', [False, True], ids=['no_times', 'times'])
 @mark.parametrize('use_perms', [False, True], ids=['no_perms', 'perms'])
 def test_copy_with_metadata(tmp_path, script_path, use_times, use_perms):
-    # Test that metadata is correctly preserved when options are specified
+    '''Test that metadata options correctly preserve file attributes.'''
+    test_content = b'Hello World!'
+    src_path = tmp_path / 'src_file'
+    src_path.write_bytes(test_content)
+
+    # Set specific metadata on source file
+    chmod(src_path, 0o640)
+    utime(src_path, ns=(1000000000000, 2000000000000))
+
+    dst_path = tmp_path / 'dst_file'
+    dst_path.write_bytes(b'-' * len(test_content))
+
+    src_stat = stat(src_path)
+    dst_stat_before = stat(dst_path)
+
+    cmd3_args = ['--times'] if use_times else []
+    cmd3_args += ['--perms'] if use_perms else []
+
+    # ... run pipeline ...
+
+    dst_stat_after = stat(dst_path)
+
+    if use_times:
+        assert dst_stat_after.st_mtime_ns == src_stat.st_mtime_ns
+    else:
+        assert dst_stat_after.st_mtime_ns != src_stat.st_mtime_ns
+
+    if use_perms:
+        assert dst_stat_after.st_mode == src_stat.st_mode
 ```
 
 ## Binární protokol - nový příkaz Meta
