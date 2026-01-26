@@ -147,14 +147,14 @@ Po příkazu `dire` následují metadata:
 
 ```
 "dmet"         (4 bytes)  - command identifier
-atime_ns       (8 bytes)  - access time (nanoseconds, signed)
-mtime_ns       (8 bytes)  - modification time (nanoseconds, signed)
-mode           (4 bytes)  - directory mode/permissions
-uid            (4 bytes)  - user id
-gid            (4 bytes)  - group id
-owner_name_len (2 bytes)  - délka jména vlastníka
+atime_ns       (8 bytes)  - access time in nanoseconds (big-endian, signed)
+mtime_ns       (8 bytes)  - modification time in nanoseconds (big-endian, signed)
+mode           (4 bytes)  - directory mode/permissions (big-endian)
+uid            (4 bytes)  - user id (big-endian)
+gid            (4 bytes)  - group id (big-endian)
+owner_name_len (2 bytes)  - délka jména vlastníka (big-endian)
 owner_name     (N bytes)  - jméno vlastníka (UTF-8)
-group_name_len (2 bytes)  - délka jména skupiny
+group_name_len (2 bytes)  - délka jména skupiny (big-endian)
 group_name     (N bytes)  - jméno skupiny (UTF-8)
 "end"          (3 bytes)  - literal end marker
 ```
@@ -355,7 +355,7 @@ Pokud se typ položky změní (soubor → adresář nebo adresář → soubor):
 Adresáře se musí vytvářet před soubory, které obsahují:
 
 - Položky seřadit tak, aby rodiče předcházeli potomkům
-- Prakticky: seřadit podle cesty zajistí správné pořadí (`a/` před `a/b.txt`)
+- Prakticky: seřadit podle cesty zajistí správné pořadí (`a` před `a/b.txt`)
 
 ### Pořadí mazání (--delete)
 
