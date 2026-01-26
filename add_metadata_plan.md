@@ -347,11 +347,27 @@ def test_copy_with_metadata(tmp_path, script_path, use_times, use_perms):
 Nový soubor `tests/test_rsync_compat.py`:
 
 ```python
+import shutil
 import subprocess
-from os import chmod, stat, utime
+from os import chmod, environ, stat, utime
 from pathlib import Path
 
 import pytest
+
+
+# Skip tests if rsync is not available locally, but fail on CI
+def _rsync_available():
+    return shutil.which('rsync') is not None
+
+def _running_on_ci():
+    # Common CI environment variables
+    return any(environ.get(var) for var in ['CI', 'GITHUB_ACTIONS', 'GITLAB_CI', 'JENKINS_URL'])
+
+# On CI: fail if rsync missing. Locally: skip gracefully.
+if not _rsync_available():
+    if _running_on_ci():
+        raise RuntimeError("rsync is required for CI but not found in PATH")
+    pytestmark = pytest.mark.skip(reason="rsync not available")
 
 
 def test_rsync_sees_no_changes_after_blockcopy(tmp_path, script_path):
@@ -636,6 +652,8 @@ def test_rsync_without_times_would_transfer(tmp_path, script_path):
 **Klíč k ověření:** `rsync --dry-run --itemize-changes` - prázdný výstup = soubory jsou shodné.
 
 **Poznámka k nanosekudnám:** rsync od verze 3.1.3 podporuje `--modify-window=-1` pro porovnávání nanosekund. blockcopy používá `os.utime(ns=...)` který zachovává plnou přesnost, takže je kompatibilní i s tímto režimem.
+
+**Poznámka k dostupnosti rsync:** Testy se přeskočí, pokud rsync není nainstalován (lokální vývoj). Na CI (detekce přes `CI`, `GITHUB_ACTIONS`, `GITLAB_CI`, `JENKINS_URL` env vars) testy selžou s chybou, pokud rsync chybí - rsync musí být na CI nainstalován.
 
 ## Binární protokol - nový příkaz Meta
 
