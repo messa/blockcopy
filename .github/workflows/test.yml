@@ -49,4 +49,4 @@ jobs:
         python -m pytest -v --tb=native tests \
           --doctest-modules \
           --junitxml=junit/test-results.xml \
-          --cov=com --cov-report=xml --cov-report=html
+          --cov=blockcopy --cov-report=xml --cov-report=html
