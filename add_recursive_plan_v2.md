@@ -8,9 +8,11 @@ Tento dokument popisuje návrh implementace volby `--recursive` pro nástroj blo
 
 1. **Jednosměrný tok dat** - zachován stávající model: checksum → retrieve → save
 2. **Přenos pouze rozdílů** - přečtou se a zahashují všechny soubory na obou stranách, přenesou se jen změněné bloky
-3. **Sekvenční zpracování souborů** - soubory se zpracovávají jeden po druhém v abecedním pořadí cest (zajišťuje deterministické chování)
+3. **Deterministické pořadí** - položky se zpracovávají v abecedním pořadí relativních cest (lexikografické řazení UTF-8 bytů), což zajišťuje reprodukovatelné chování
 
 ## Návrh protokolu
+
+**Formát čísel:** Všechna vícebytová čísla v protokolu jsou kódována jako big-endian (network byte order), stejně jako ve stávající verzi blockcopy.
 
 **Poznámka k symlinkům:** Symlinky se následují (followlinks=True). Přenáší se obsah cílového souboru/adresáře, nikoliv samotný symlink. Tím se zjednodušuje protokol a chování je konzistentní.
 
@@ -21,7 +23,7 @@ Checksum projde cílový adresář a pro každou položku odešle informace. Pou
 #### Příkaz `file` - soubor
 
 ```
-file           (4 bytes)  - command identifier
+"file"         (4 bytes)  - command identifier
 path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
 path           (N bytes)  - relativní cesta (UTF-8)
 file_size      (8 bytes)  - velikost souboru (big-endian)
@@ -32,7 +34,7 @@ Po příkazu `file` následují hashe všech bloků (pokud `file_size > 0`):
 #### Příkaz `Hash` (beze změny) - hash bloku
 
 ```
-Hash           (4 bytes)  - command identifier
+"Hash"         (4 bytes)  - command identifier
 block_pos      (8 bytes)  - pozice v souboru (big-endian)
 block_size     (4 bytes)  - velikost bloku (big-endian)
 block_hash     (64 bytes) - SHA3-512 digest
@@ -43,15 +45,15 @@ Po posledním hashi následuje konec souboru:
 #### Příkaz `endf` (end file) - konec souboru
 
 ```
-endf           (4 bytes)  - command identifier
+"endf"         (4 bytes)  - command identifier
 ```
 
 #### Příkaz `dire` - adresář
 
 ```
-dire           (4 bytes)  - command identifier
+"dire"         (4 bytes)  - command identifier
 path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
-path           (N bytes)  - relativní cesta (UTF-8)
+path           (N bytes)  - relativní cesta (UTF-8, bez trailing slash)
 ```
 
 Adresáře nemají žádná následující data ani ukončovací příkaz.
@@ -59,7 +61,7 @@ Adresáře nemají žádná následující data ani ukončovací příkaz.
 #### Příkaz `done` (beze změny) - konec celého přenosu
 
 ```
-done           (4 bytes)  - command identifier
+"done"         (4 bytes)  - command identifier
 ```
 
 #### Příklad toku dat (checksum)
@@ -69,7 +71,7 @@ file + "src/main.py" + 1024
   Hash + 0 + 131072 + <hash1>
   ... (další hashe pokud je soubor větší)
 endf
-dire + "src/utils/"
+dire + "src/utils"
 file + "src/utils/helper.py" + 512
   Hash + 0 + 512 + <hash2>
 endf
@@ -83,8 +85,8 @@ Retrieve čte hashe ze stdin, porovnává se zdrojovými soubory a odesílá zm�
 #### Příkaz `file` - soubor
 
 ```
-file           (4 bytes)  - command identifier
-path_len       (4 bytes)  - délka cesty v bajtech
+"file"         (4 bytes)  - command identifier
+path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
 path           (N bytes)  - relativní cesta (UTF-8)
 ```
 
@@ -93,50 +95,50 @@ Po příkazu `file` mohou následovat datové bloky (pro změněné/nové soubor
 #### Příkaz `data` (beze změny) - datový blok
 
 ```
-data           (4 bytes)  - command identifier
-block_pos      (8 bytes)  - pozice v souboru
-block_size     (4 bytes)  - velikost dat
+"data"         (4 bytes)  - command identifier
+block_pos      (8 bytes)  - pozice v souboru (big-endian)
+block_size     (4 bytes)  - velikost dat (big-endian)
 block_data     (N bytes)  - raw data
 ```
 
 #### Příkaz `dlzm` (beze změny) - komprimovaný datový blok
 
 ```
-dlzm           (4 bytes)  - command identifier
-block_pos      (8 bytes)  - pozice v souboru
-block_size     (4 bytes)  - velikost komprimovaných dat
+"dlzm"         (4 bytes)  - command identifier
+block_pos      (8 bytes)  - pozice v souboru (big-endian)
+block_size     (4 bytes)  - velikost komprimovaných dat (big-endian)
 block_data     (N bytes)  - LZMA komprimovaná data
 ```
 
 #### Příkaz `meta` - metadata souboru
 
 ```
-meta           (4 bytes)  - command identifier
-atime_ns       (8 bytes)  - access time (nanoseconds, signed)
-mtime_ns       (8 bytes)  - modification time (nanoseconds, signed)
-mode           (4 bytes)  - file mode/permissions
-uid            (4 bytes)  - user id
-gid            (4 bytes)  - group id
-owner_name_len (2 bytes)  - délka jména vlastníka
+"meta"         (4 bytes)  - command identifier
+atime_ns       (8 bytes)  - access time in nanoseconds (big-endian, signed)
+mtime_ns       (8 bytes)  - modification time in nanoseconds (big-endian, signed)
+mode           (4 bytes)  - file mode/permissions (big-endian)
+uid            (4 bytes)  - user id (big-endian)
+gid            (4 bytes)  - group id (big-endian)
+owner_name_len (2 bytes)  - délka jména vlastníka (big-endian)
 owner_name     (N bytes)  - jméno vlastníka (UTF-8)
-group_name_len (2 bytes)  - délka jména skupiny
+group_name_len (2 bytes)  - délka jména skupiny (big-endian)
 group_name     (N bytes)  - jméno skupiny (UTF-8)
-total_size     (8 bytes)  - velikost souboru
-end            (3 bytes)  - literal "end" marker
+total_size     (8 bytes)  - velikost souboru (big-endian)
+"end"          (3 bytes)  - literal end marker
 ```
 
 #### Příkaz `endf` (end file) - konec souboru
 
 ```
-endf           (4 bytes)  - command identifier
+"endf"         (4 bytes)  - command identifier
 ```
 
 #### Příkaz `dire` - adresář
 
 ```
-dire           (4 bytes)  - command identifier
-path_len       (4 bytes)  - délka cesty v bajtech
-path           (N bytes)  - relativní cesta (UTF-8)
+"dire"         (4 bytes)  - command identifier
+path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
+path           (N bytes)  - relativní cesta (UTF-8, bez trailing slash)
 ```
 
 Po příkazu `dire` následují metadata:
@@ -144,7 +146,7 @@ Po příkazu `dire` následují metadata:
 #### Příkaz `dmet` - metadata adresáře
 
 ```
-dmet           (4 bytes)  - command identifier
+"dmet"         (4 bytes)  - command identifier
 atime_ns       (8 bytes)  - access time (nanoseconds, signed)
 mtime_ns       (8 bytes)  - modification time (nanoseconds, signed)
 mode           (4 bytes)  - directory mode/permissions
@@ -154,25 +156,25 @@ owner_name_len (2 bytes)  - délka jména vlastníka
 owner_name     (N bytes)  - jméno vlastníka (UTF-8)
 group_name_len (2 bytes)  - délka jména skupiny
 group_name     (N bytes)  - jméno skupiny (UTF-8)
-end            (3 bytes)  - literal "end" marker
+"end"          (3 bytes)  - literal end marker
 ```
 
-Adresáře nemají ukončovací příkaz (metadata jsou volitelná a příkaz `dmet` je ukončuje).
+Adresáře nemají ukončovací příkaz (příkaz `dmet` ukončuje sekvenci pro daný adresář).
 
 #### Příkaz `remv` - smazání položky
 
 Pro mazání souborů i adresářů (s `--delete`):
 
 ```
-remv           (4 bytes)  - command identifier
-path_len       (4 bytes)  - délka cesty v bajtech
+"remv"         (4 bytes)  - command identifier
+path_len       (4 bytes)  - délka cesty v bajtech (big-endian)
 path           (N bytes)  - relativní cesta (UTF-8)
 ```
 
 #### Příkaz `done` (beze změny) - konec přenosu
 
 ```
-done           (4 bytes)  - command identifier
+"done"         (4 bytes)  - command identifier
 ```
 
 #### Příklad toku dat (retrieve)
@@ -196,17 +198,17 @@ file + "src/utils/helper.py"
 endf
 
 # Adresář
-dire + "src/new_dir/"
+dire + "src/new_dir"
   dmet + <metadata>
 
-dire + "src/utils/"
+dire + "src/utils"
   dmet + <metadata>
 
 # Smazat soubor (existuje na dest, ne na source)
 remv + "src/old_file.py"
 
 # Smazat adresář
-remv + "src/old_dir/"
+remv + "src/old_dir"
 
 done
 ```
