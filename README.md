@@ -10,12 +10,18 @@ Uses threadpool for computing hashes so that copy speed is not limited by CPU.
 Installation
 ------------
 
-You can just [download](https://raw.githubusercontent.com/messa/blockcopy/main/blockcopy.py) the file `blockcopy.py` to `/usr/local/bin` and run it.
+You can just [download](https://raw.githubusercontent.com/messa/blockcopy/v0.0.2/blockcopy.py) the file `blockcopy.py` to `/usr/local/bin` and run it.
+
+```
+curl -fsSL https://raw.githubusercontent.com/messa/blockcopy/v0.0.2/blockcopy.py \
+  -o /usr/local/bin/blockcopy
+chmod +x /usr/local/bin/blockcopy
+```
 
 Or you can install this package using `pip install` and then run the script as `blockcopy`:
 
 ```shell
-python3 -m pip install https://github.com/messa/blockcopy/archive/refs/heads/main.zip
+python3 -m pip install https://github.com/messa/blockcopy/archive/refs/tags/v0.0.2.zip
 ```
 
 
@@ -23,14 +29,32 @@ Usage
 -----
 
 ```shell
-blockcopy.py checksum /dev/destination | ssh srchost blockcopy.py retrieve /dev/source | blockcopy.py save /dev/destination
+./blockcopy.py checksum /dev/destination \
+  | ssh srchost ./blockcopy.py retrieve /dev/source \
+  | ./blockcopy.py save /dev/destination
 ```
 
 Or:
 
 ```shell
-ssh dsthost blockcopy.py checksum /dev/destination | blockcopy.py retrieve /dev/source | ssh dsthost blockcopy.py save /dev/destination
+ssh dsthost ./blockcopy.py checksum /dev/destination \
+  | ./blockcopy.py retrieve /dev/source \
+  | ssh dsthost ./blockcopy.py save /dev/destination
 ```
+
+
+How it works
+------------
+
+The tool uses a three-stage pipeline connected via stdin/stdout:
+
+1. **checksum** - Reads the destination file/device, splits it into 128 KB blocks, computes SHA3-512 hash for each block, and outputs the hashes as a binary stream.
+
+2. **retrieve** - Reads hashes from stdin while simultaneously reading the source file. For each block, it compares the destination hash with the source block's hash. Only blocks that differ are sent to the output stream.
+
+3. **save** - Reads block data from stdin and writes them to the destination file/device at the correct positions.
+
+Each stage uses a ThreadPoolExecutor with multiple worker threads for hash computation, so the copy speed is not limited by single-core CPU performance. This is especially important for fast NVMe disks where sequential read speed can exceed what a single CPU core can hash.
 
 
 Alternative software
