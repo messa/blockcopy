@@ -11,6 +11,7 @@ blockcopy is a Python CLI tool for efficiently copying large files and block dev
 ### Run tests
 ```bash
 make check                    # Run all tests with uv
+make check pytest_args="-k test_name"  # Run with additional pytest arguments
 uv run pytest -s -vv tests    # Same as above, explicit
 uv run pytest tests/test_checksum.py::test_checksum_file  # Run single test
 ```
@@ -53,11 +54,34 @@ Threads communicate via `Queue` objects. `ExceptionCollector` aggregates errors 
 
 ### Binary protocol
 
+**checksum → retrieve:**
 - `Hash` command: 4 bytes cmd + 8 bytes position + 4 bytes size + 64 bytes SHA3-512 digest
+- `rest` command: 4 bytes cmd + 8 bytes offset (signals to send remaining data beyond checksummed range)
+- `done` command: 4 bytes cmd (signals completion)
+
+**retrieve → save:**
 - `data` command: 4 bytes cmd + 8 bytes position + 4 bytes size + N bytes data
 - `dlzm` command: same as `data` but LZMA compressed (optional `--lzma` flag)
-- `rest` command: signals to send remaining data beyond checksummed range
-- `Done` command: 4 bytes cmd + 8 bytes total size (signals completion)
+- `meta` command: 4 bytes cmd + 8 bytes atime_ns + 8 bytes mtime_ns + 4 bytes mode + 4 bytes uid + 4 bytes gid + 2 bytes owner_name_len + owner_name + 2 bytes group_name_len + group_name + 8 bytes total_size + 3 bytes "end"
+- `done` command: 4 bytes cmd (signals completion)
+
+### CLI options
+
+**checksum:**
+- `--progress` - show progress info to stderr
+- `--start OFFSET` - start reading from byte offset
+- `--end OFFSET` - stop reading at byte offset
+
+**retrieve:**
+- `--lzma` - compress blocks using LZMA (sends `dlzm` instead of `data` when compressed is smaller)
+
+**save:**
+- `--truncate` - truncate destination file to source size (uses `received_total_size` from `meta`)
+- `-t, --times` - preserve atime/mtime from source
+- `-p, --perms` - preserve mode from source
+- `-o, --owner` - preserve uid/owner from source
+- `-g, --group` - preserve gid/group from source
+- `--numeric-ids` - use numeric uid/gid instead of name lookup
 
 ## Key constants
 

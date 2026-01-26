@@ -34,11 +34,15 @@ See also readme: https://github.com/messa/blockcopy
 '''
 
 from argparse import ArgumentParser
+from base64 import b64encode
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from grp import getgrgid, getgrnam
 from hashlib import sha3_512
 from logging import getLogger
-from os import cpu_count, environ, getpid, kill, SEEK_END
+from os import chmod, chown, cpu_count, environ, getpid, kill, SEEK_END, utime
+from pathlib import Path
+from pwd import getpwuid, getpwnam
 from queue import Queue
 from sys import exit, stderr, stdin, stdout
 from threading import Event, Lock
@@ -102,6 +106,22 @@ class ExceptionCollector:
             return bool(self._exceptions)
 
 
+def get_user_name_by_uid(uid):
+    '''Get username by UID, returns empty string if not found.'''
+    try:
+        return getpwuid(uid).pw_name
+    except KeyError:
+        return ''
+
+
+def get_group_name_by_gid(gid):
+    '''Get group name by GID, returns empty string if not found.'''
+    try:
+        return getgrgid(gid).gr_name
+    except KeyError:
+        return ''
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument('-v', '--verbose', action='store_true')
@@ -122,6 +142,11 @@ def main():
 
     p_save.add_argument('destination_file')
     p_save.add_argument('--truncate', action='store_true', help='truncate the destination file to the size of the source file')
+    p_save.add_argument('--times', '-t', action='store_true', help='preserve timestamps from source file')
+    p_save.add_argument('--perms', '-p', action='store_true', help='preserve permissions from source file')
+    p_save.add_argument('--owner', '-o', action='store_true', help='preserve owner from source file')
+    p_save.add_argument('--group', '-g', action='store_true', help='preserve group from source file')
+    p_save.add_argument('--numeric-ids', action='store_true', help='use numeric uid/gid instead of looking up user/group names')
 
     args = parser.parse_args()
 
@@ -134,13 +159,16 @@ def main():
         if args.command == 'checksum':
             do_checksum(args.destination_file, stdout.buffer, start_offset=args.start, end_offset=args.end, show_progress=args.progress)
         elif args.command == 'retrieve':
-            do_retrieve(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma)
+            do_retrieve(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma, verbose=args.verbose)
         elif args.command == 'save':
-            do_save(args.destination_file, stdin.buffer, truncate=args.truncate)
+            do_save(args.destination_file, stdin.buffer, truncate=args.truncate,
+                    preserve_times=args.times, preserve_perms=args.perms,
+                    preserve_owner=args.owner, preserve_group=args.group,
+                    numeric_ids=args.numeric_ids)
         else:
             raise Exception(f'Not implemented: {args.command}')
 
-        logger.debug('Done')
+        logger.debug('Done (command=%r)', args.command)
     except CollectedExceptions as exc:
         logger.error('Failed: %r', exc)
         exit(f'ERROR ({args.command}): {exc}')
@@ -403,7 +431,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
         print(f'Checksum done in {checksum_duration:.3f} seconds', file=stderr, flush=True)
 
 
-def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
+def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma, verbose=False):
     '''
     Read the file in blocks, calculate hash of each block, read hash from
     hash_input_stream and if those hashes differ, write the block to
@@ -428,6 +456,8 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
 
     if file_path == '-':
         exit('ERROR (retrieve): file_path must be actual file or device, not `-`')
+    file_path = Path(file_path).resolve()
+    assert file_path.is_file() or file_path.is_block_device()
 
     if block_output_stream.isatty():
         exit('ERROR (retrieve): block_output_stream is a tty - will not write binary data to terminal')
@@ -444,7 +474,7 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
             # Only one will run
             nonlocal received_done, encountered_incomplete_read
             try:
-                with open(file_path, 'rb') as f:
+                with file_path.open(mode='rb') as f:
                     hash_batch = []
 
                     def flush_hash_batch():
@@ -470,9 +500,9 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                             flush_hash_batch()
                             raise IncompleteReadError('Incomplete read of command from hash input stream')
 
-                        logger.debug('Processing command: %r', command)
-
                         if command == b'done':
+                            if verbose:
+                                logger.debug('Retrieve received command %r', command)
                             received_done = True
                             flush_hash_batch()
                             break
@@ -486,6 +516,10 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                             if len(block_size_b) != 4 or len(destination_hash) != hash_digest_size:
                                 raise IncompleteReadError('Incomplete read of hash from hash input stream')
                             block_size = int.from_bytes(block_size_b, 'big')
+                            if verbose:
+                                logger.debug(
+                                    'Retrieve received command %r block_size=%d destination_hash=%s',
+                                    command, block_size, b64encode(destination_hash).decode('utf-8'))
                             assert len(destination_hash) == hash_digest_size
                             block_pos = f.tell()
                             block_data = f.read(block_size)
@@ -504,9 +538,14 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                                 raise IncompleteReadError('Incomplete read of hash from hash input stream')
                             block_pos = int.from_bytes(block_pos_b, 'big')
                             block_size = int.from_bytes(block_size_b, 'big')
+                            if verbose:
+                                logger.debug(
+                                    'Retrieve received command %r block_pos=%d block_size=%d destination_hash=%s',
+                                    command, block_pos, block_size, b64encode(destination_hash).decode('utf-8'))
                             assert len(destination_hash) == hash_digest_size
                             if f.tell() != block_pos:
-                                logger.debug('Seeking to %d', block_pos)
+                                if verbose:
+                                    logger.debug('Seeking to %d', block_pos)
                                 f.seek(block_pos)
                                 assert f.tell() == block_pos
                             block_data = f.read(block_size)
@@ -534,6 +573,8 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                             if len(offset_b) != 8:
                                 raise IncompleteReadError('Incomplete read of offset from hash input stream')
                             offset = int.from_bytes(offset_b, 'big')
+                            if verbose:
+                                logger.debug('Retrieve received command %r offset=%d', command, offset)
                             f.seek(offset)
                             assert f.tell() == offset
                             # logger.debug('Sending the rest of the file from offset %d', offset)
@@ -562,6 +603,7 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
                                 del block_batch
 
                         else:
+                            logger.debug('Retrieve received unknown command: %r', command)
                             raise Exception(f'Unknown command received: {command!r}')
 
                     assert not hash_batch
@@ -689,16 +731,57 @@ def do_retrieve(file_path, hash_input_stream, block_output_stream, use_lzma):
         # This should not happen, because that should already trigger the incomplete read exception.
         exit('ERROR (retrieve): Received no done command from the checksum side')
 
-    with open(file_path, 'rb') as f:
-        total_size = f.seek(0, SEEK_END)
+    if environ.get('SKIP_SENDING_META'):
+        logger.info('Skipping metadata')
+    else:
+        # Get metadata, with optional env overrides for deterministic testing
+        stat_result = file_path.stat()
+        atime_ns = int(environ.get('BLOCKCOPY_OVERRIDE_ATIME_NS', stat_result.st_atime_ns))
+        mtime_ns = int(environ.get('BLOCKCOPY_OVERRIDE_MTIME_NS', stat_result.st_mtime_ns))
+        mode = int(environ.get('BLOCKCOPY_OVERRIDE_MODE', stat_result.st_mode))
+        uid = int(environ.get('BLOCKCOPY_OVERRIDE_UID', stat_result.st_uid))
+        gid = int(environ.get('BLOCKCOPY_OVERRIDE_GID', stat_result.st_gid))
+        owner_name = environ.get('BLOCKCOPY_OVERRIDE_OWNER', get_user_name_by_uid(stat_result.st_uid))
+        group_name = environ.get('BLOCKCOPY_OVERRIDE_GROUP', get_group_name_by_gid(stat_result.st_gid))
+
+        with file_path.open(mode='rb') as f:
+            # On block devices, stat_result.st_size is 0, so we need to get size of the device via seek.
+            total_size = f.seek(0, SEEK_END)
+
+        owner_name_bytes = owner_name.encode('utf-8')
+        group_name_bytes = group_name.encode('utf-8')
+
+        logger.debug(
+            'File %s metadata: atime_ns=%d mtime_ns=%d mode=%d uid=%d gid=%d owner_name=%s group_name=%s size(seek)=%d size(stat)=%d',
+            file_path, atime_ns, mtime_ns, mode, uid, gid, owner_name, group_name, total_size, stat_result.st_size)
+
+        with block_output_stream_lock:
+            # Send metadata command
+            block_output_stream.write(b'meta')
+            block_output_stream.write(atime_ns.to_bytes(8, 'big', signed=True))
+            block_output_stream.write(mtime_ns.to_bytes(8, 'big', signed=True))
+            block_output_stream.write(mode.to_bytes(4, 'big'))
+            block_output_stream.write(uid.to_bytes(4, 'big'))
+            block_output_stream.write(gid.to_bytes(4, 'big'))
+            block_output_stream.write(len(owner_name_bytes).to_bytes(2, 'big'))
+            block_output_stream.write(owner_name_bytes)
+            block_output_stream.write(len(group_name_bytes).to_bytes(2, 'big'))
+            block_output_stream.write(group_name_bytes)
+            block_output_stream.write(total_size.to_bytes(8, 'big'))
+            block_output_stream.write(b'end')
+
+        del atime_ns, mtime_ns, mode, uid, gid, owner_name_bytes, group_name_bytes, total_size
 
     with block_output_stream_lock:
-        block_output_stream.write(b'Done')
-        block_output_stream.write(total_size.to_bytes(8, 'big'))
+        # Send done command
+        block_output_stream.write(b'done')
         block_output_stream.flush()
 
 
-def do_save(file_path, block_input_stream, truncate=False):
+def do_save(file_path, block_input_stream, truncate=False,
+            preserve_times=False, preserve_perms=False,
+            preserve_owner=False, preserve_group=False,
+            numeric_ids=False):
     '''
     Read blocks from block_input_stream and write them to the file.
 
@@ -708,9 +791,21 @@ def do_save(file_path, block_input_stream, truncate=False):
 
     if file_path == '-':
         exit('ERROR (save): file_path must be actual file or device, not `-`')
+    file_path = Path(file_path).resolve()
+    assert file_path.is_file() or file_path.is_block_device()
 
     try:
+        received_any_data = False
         received_done = False
+        received_atime_ns = None
+        received_mtime_ns = None
+        received_mode = None
+        received_uid = None
+        received_gid = None
+        received_owner_name = None
+        received_group_name = None
+        received_total_size = None
+
         with open(file_path, 'r+b') as f:
             while True:
                 command = block_input_stream.read(4)
@@ -718,22 +813,16 @@ def do_save(file_path, block_input_stream, truncate=False):
                     raise IncompleteReadError('The block input stream was closed unexpectedly without receiving the `done` command')
                 if len(command) != 4:
                     raise IncompleteReadError('Incomplete read of command from block input stream')
+
                 if command == b'done':
-                    # Old variant of the done command - no size of the source file
                     received_done = True
                     f.flush()
-                    # Cannot truncate here - we do not know the size of the source file.
-                    # We know only the offset of the end of last changed block.
+                    if truncate and received_total_size is not None:
+                        if received_total_size == 0 and received_any_data:
+                            raise Exception('Would truncate to 0 bytes, but received some data - this is probably some error')
+                        f.truncate(received_total_size)
                     break
-                if command == b'Done':
-                    # New variant of the done command - contains the size of the source file
-                    received_done = True
-                    f.flush()
-                    done_pos_b = block_input_stream.read(8)
-                    done_pos = int.from_bytes(done_pos_b, 'big')
-                    if truncate:
-                        f.truncate(done_pos)
-                    break
+
                 elif command in (b'data', b'dlzm'):
                     block_pos_b = block_input_stream.read(8)
                     block_size_b = block_input_stream.read(4)
@@ -744,18 +833,106 @@ def do_save(file_path, block_input_stream, truncate=False):
                     block_data = block_input_stream.read(block_size)
                     if len(block_data) != block_size:
                         raise IncompleteReadError('Incomplete read of block data from block input stream')
+                    received_any_data = True
                     if command == b'dlzm':
                         if lzma_decompress is None:
                             from lzma import decompress as lzma_decompress
                         block_data = lzma_decompress(block_data)
                     f.seek(block_pos)
                     f.write(block_data)
+
+                elif command == b'meta':
+                    # Read metadata: atime_ns(8) + mtime_ns(8) + mode(4) + uid(4) + gid(4) = 28 bytes
+                    meta_data = block_input_stream.read(28)
+                    if len(meta_data) != 28:
+                        raise IncompleteReadError('Incomplete read of metadata from block input stream')
+                    received_atime_ns = int.from_bytes(meta_data[0:8], 'big', signed=True)
+                    received_mtime_ns = int.from_bytes(meta_data[8:16], 'big', signed=True)
+                    received_mode = int.from_bytes(meta_data[16:20], 'big')
+                    received_uid = int.from_bytes(meta_data[20:24], 'big')
+                    received_gid = int.from_bytes(meta_data[24:28], 'big')
+
+                    # Read owner name
+                    owner_name_len_bytes = block_input_stream.read(2)
+                    if len(owner_name_len_bytes) != 2:
+                        raise IncompleteReadError('Incomplete read of owner name length')
+                    owner_name_len = int.from_bytes(owner_name_len_bytes, 'big')
+                    received_owner_name = block_input_stream.read(owner_name_len).decode('utf-8') if owner_name_len > 0 else ''
+
+                    # Read group name
+                    group_name_len_bytes = block_input_stream.read(2)
+                    if len(group_name_len_bytes) != 2:
+                        raise IncompleteReadError('Incomplete read of group name length')
+                    group_name_len = int.from_bytes(group_name_len_bytes, 'big')
+                    received_group_name = block_input_stream.read(group_name_len).decode('utf-8') if group_name_len > 0 else ''
+
+                    # Read total size
+                    total_size_bytes = block_input_stream.read(8)
+                    if len(total_size_bytes) != 8:
+                        raise IncompleteReadError('Incomplete read of total size from block input stream')
+                    received_total_size = int.from_bytes(total_size_bytes, 'big')
+
+                    # Read end marker
+                    end_marker = block_input_stream.read(3)
+                    if end_marker != b'end':
+                        raise IncompleteReadError(f'Expected end marker, got {end_marker!r}')
                 else:
                     raise Exception(f'Unknown command received: {command!r}')
 
         if not received_done:
             # Should not happen - should already trigger the incomplete read exception.
             exit('ERROR (save): Received no done command from the retrieve side')
+
+        # Apply metadata after file is closed
+        if preserve_perms and received_mode is not None:
+            old_mode = file_path.stat().st_mode
+            chmod(file_path, received_mode)
+            new_mode = file_path.stat().st_mode
+            logger.info('chmod %s: %o -> %o', file_path, old_mode, new_mode)
+
+        if (preserve_owner or preserve_group) and (received_uid is not None or received_gid is not None):
+            uid_to_set = -1
+            gid_to_set = -1
+
+            if preserve_owner and received_uid is not None:
+                if numeric_ids or not received_owner_name:
+                    uid_to_set = received_uid
+                else:
+                    try:
+                        uid_to_set = getpwnam(received_owner_name).pw_uid
+                    except KeyError:
+                        logger.warning('User %r not found, falling back to uid %d', received_owner_name, received_uid)
+                        uid_to_set = received_uid
+
+            if preserve_group and received_gid is not None:
+                if numeric_ids or not received_group_name:
+                    gid_to_set = received_gid
+                else:
+                    try:
+                        gid_to_set = getgrnam(received_group_name).gr_gid
+                    except KeyError:
+                        logger.warning('Group %r not found, falling back to gid %d', received_group_name, received_gid)
+                        gid_to_set = received_gid
+
+            try:
+                old_stat = file_path.stat()
+                chown(file_path, uid_to_set, gid_to_set)
+                new_stat = file_path.stat()
+                logger.info(
+                    'chown %s: uid %d (%s) -> %d (%s), gid %d (%s) -> %d (%s)', file_path,
+                    old_stat.st_uid, get_user_name_by_uid(old_stat.st_uid),
+                    new_stat.st_uid, get_user_name_by_uid(new_stat.st_uid),
+                    old_stat.st_gid, get_group_name_by_gid(old_stat.st_gid),
+                    new_stat.st_gid, get_group_name_by_gid(new_stat.st_gid))
+            except PermissionError as e:
+                logger.warning('Failed to change owner/group: %s', e)
+
+        if preserve_times and received_atime_ns is not None and received_mtime_ns is not None:
+            old_stat = file_path.stat()
+            utime(file_path, ns=(received_atime_ns, received_mtime_ns))
+            new_stat = file_path.stat()
+            logger.info('utime %s: atime_ns %d -> %d, mtime_ns %d -> %d', file_path, old_stat.st_atime_ns, new_stat.st_atime_ns, old_stat.st_mtime_ns, new_stat.st_mtime_ns)
+
     except IncompleteReadError as exc:
         exit(f'ERROR (save): {exc}')
 

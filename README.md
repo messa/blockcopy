@@ -12,7 +12,7 @@ Installation
 
 You can just [download](https://raw.githubusercontent.com/messa/blockcopy/v0.0.2/blockcopy.py) the file `blockcopy.py` to `/usr/local/bin` and run it.
 
-```
+```shell
 curl -fsSL https://raw.githubusercontent.com/messa/blockcopy/v0.0.2/blockcopy.py \
   -o /usr/local/bin/blockcopy
 chmod +x /usr/local/bin/blockcopy
@@ -29,18 +29,36 @@ Usage
 -----
 
 ```shell
-./blockcopy.py checksum /dev/destination \
-  | ssh srchost ./blockcopy.py retrieve /dev/source \
-  | ./blockcopy.py save /dev/destination
+blockcopy checksum /dev/destination \
+  | ssh srchost blockcopy retrieve /dev/source \
+  | blockcopy save /dev/destination
 ```
 
 Or:
 
 ```shell
-ssh dsthost ./blockcopy.py checksum /dev/destination \
-  | ./blockcopy.py retrieve /dev/source \
-  | ssh dsthost ./blockcopy.py save /dev/destination
+ssh dsthost blockcopy checksum /dev/destination \
+  | blockcopy retrieve /dev/source \
+  | ssh dsthost blockcopy save /dev/destination
 ```
+
+### Options
+
+**checksum:**
+- `--progress` - show progress info
+- `--start OFFSET` - start reading from this byte offset
+- `--end OFFSET` - stop reading at this byte offset
+
+**retrieve:**
+- `--lzma` - compress blocks using LZMA before sending (useful for slow networks)
+
+**save:**
+- `--truncate` - truncate destination file to match source file size
+- `-t, --times` - preserve timestamps (atime, mtime) from source file
+- `-p, --perms` - preserve permissions from source file
+- `-o, --owner` - preserve owner from source file
+- `-g, --group` - preserve group from source file
+- `--numeric-ids` - use numeric uid/gid instead of looking up user/group names
 
 
 How it works

@@ -124,9 +124,9 @@ jobs:
         echo "Modified content at offset 5MB" | sudo dd of=$SRC_DEVICE bs=1 seek=5242880 conv=notrunc
 
         # Run blockcopy
-        uv run blockcopy checksum $DST_DEVICE | \
-          uv run blockcopy retrieve $SRC_DEVICE | \
-          uv run blockcopy save $DST_DEVICE
+        uv run blockcopy --verbose checksum $DST_DEVICE | \
+          uv run blockcopy --verbose retrieve $SRC_DEVICE | \
+          uv run blockcopy --verbose save $DST_DEVICE
 
         # Verify
         SRC_MD5=$(md5sum $SRC_DEVICE | cut -d' ' -f1)

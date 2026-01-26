@@ -135,3 +135,53 @@ def test_checksum_stdin_progress(tmp_path, script_path, terminate_process):
             sha3_512(test_content).digest(), # block hash
             b'done',
         ])
+
+
+def test_checksum_file_end_offset(tmp_path, script_path, terminate_process):
+    '''Test checksum with --end offset - only checksums up to the specified byte.'''
+    test_content = b'Hello World!'
+    assert len(test_content) == 12
+    sample_path = tmp_path / 'src_file'
+    sample_path.write_bytes(test_content)
+    # Only checksum first 5 bytes ("Hello")
+    cmd = [executable, script_path, 'checksum', '--end', '5', str(sample_path)]
+
+    with ExitStack() as stack:
+        p1 = stack.enter_context(Popen(cmd, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
+        stack.callback(lambda: terminate_process(p1))
+        p1_output, p1_error = p1.communicate(input=None, timeout=5)
+        assert p1.wait() == 0
+        assert p1_error == b''
+        # With --end, there should be no 'rest' command
+        assert p1_output == b''.join([
+            b'Hash',
+            b'\x00\x00\x00\x00\x00\x00\x00\x00', # block pos
+            b'\x00\x00\x00\x05', # block data length (5 bytes)
+            sha3_512(b'Hello').digest(), # hash of "Hello"
+            b'done',
+        ])
+
+
+def test_checksum_file_start_and_end_offset(tmp_path, script_path, terminate_process):
+    '''Test checksum with both --start and --end offsets.'''
+    test_content = b'Hello World!'
+    assert len(test_content) == 12
+    sample_path = tmp_path / 'src_file'
+    sample_path.write_bytes(test_content)
+    # Only checksum bytes 6-11 (" World" without "!")
+    cmd = [executable, script_path, 'checksum', '--start', '6', '--end', '11', str(sample_path)]
+
+    with ExitStack() as stack:
+        p1 = stack.enter_context(Popen(cmd, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
+        stack.callback(lambda: terminate_process(p1))
+        p1_output, p1_error = p1.communicate(input=None, timeout=5)
+        assert p1.wait() == 0
+        assert p1_error == b''
+        # With --end, there should be no 'rest' command
+        assert p1_output == b''.join([
+            b'Hash',
+            b'\x00\x00\x00\x00\x00\x00\x00\x06', # block pos (starts at 6)
+            b'\x00\x00\x00\x05', # block data length (5 bytes: "World")
+            sha3_512(b'World').digest(), # hash of "World"
+            b'done',
+        ])
