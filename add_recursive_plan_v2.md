@@ -419,7 +419,7 @@ Podobný model:
 
 ### Fáze save
 
-Jednověláknové zpracování (jako dosud) - zápis musí být sekvenční.
+Jednovláknové zpracování (jako dosud) - zápis musí být sekvenční.
 
 ## Změny ve struktuře kódu
 
