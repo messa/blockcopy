@@ -67,6 +67,7 @@ Adresáře nemají žádná následující data ani ukončovací příkaz.
 #### Příklad toku dat (checksum)
 
 ```
+dire + "" (path_len=0, root adresář)
 file + "src/main.py" + 1024
   Hash + 0 + 131072 + <hash1>
   ... (další hashe pokud je soubor větší)
@@ -224,12 +225,13 @@ done
 ### Fáze checksum
 
 1. Pokud `--recursive`:
-   a. Rekurzivně projít cílový adresář (`followlinks=True`)
-   b. Seřadit položky podle cesty (abecedně)
-   c. Pro každou položku:
+   a. Odeslat `'dire'` s prázdnou cestou (`path_len=0`) - root adresář
+   b. Rekurzivně projít cílový adresář (`followlinks=True`)
+   c. Seřadit položky podle cesty (abecedně)
+   d. Pro každou položku:
       - Adresář: odeslat příkaz `'dire'`
       - Soubor: odeslat příkaz `'file'`, pak hashe všech bloků, pak `'endf'`
-   d. Odeslat příkaz `'done'`
+   e. Odeslat příkaz `'done'`
 2. Jinak (původní chování):
    - Zpracovat jako dosud (jeden soubor)
 
@@ -313,8 +315,8 @@ Poznámka: Implementace `--exclude` může být přidána v budoucí verzi.
 
 ### Neexistující dest adresář
 
-Pokud cílový adresář neexistuje:
-- Checksum nemá co procházet, pošle pouze `done`
+Pokud cílový adresář neexistuje nebo je prázdný:
+- Checksum pošle `'dire'` s prázdnou cestou (root) a pak `'done'`
 - Retrieve pošle všechny položky ze source jako nové
 - Save vytvoří celou strukturu od začátku
 
@@ -769,6 +771,17 @@ Symlinky se nepřenášejí jako symlinky, ale jako jejich cílový obsah:
 - Destination dostane skutečná data, ne závislost na lokálních cestách source
 - Konzistentní chování nezávislé na umístění source
 - Budoucí rozšíření `--no-dereference` může přidat podporu pro kopírování symlinků
+
+### Rozlišení recursive vs. single-file režimu
+
+Receiver může rozlišit režim podle prvního příkazu:
+- `'dire'` → recursive režim (první příkaz je vždy root adresář s `path_len=0`)
+- `'Hash'` → single-file režim
+
+Toto umožňuje:
+- Auto-detekci režimu bez nutnosti explicitního flags
+- Root adresář je legitimní položka - jeho metadata se také přenesou
+- I prázdný dest adresář pošle `'dire'` s prázdnou cestou, takže recursive režim je vždy rozpoznatelný
 
 ## Budoucí rozšíření (mimo scope tohoto plánu)
 
