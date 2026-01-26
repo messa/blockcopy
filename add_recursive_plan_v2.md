@@ -223,46 +223,41 @@ done
 
 ### Fáze checksum
 
-```
-1. Pokud --recursive:
-   a. Rekurzivně projít cílový adresář (followlinks=True)
+1. Pokud `--recursive`:
+   a. Rekurzivně projít cílový adresář (`followlinks=True`)
    b. Seřadit položky podle cesty (abecedně)
    c. Pro každou položku:
-      - Adresář: odeslat příkaz 'dire'
-      - Soubor: odeslat příkaz 'file', pak hashe všech bloků, pak 'endf'
-   d. Odeslat příkaz 'done'
+      - Adresář: odeslat příkaz `'dire'`
+      - Soubor: odeslat příkaz `'file'`, pak hashe všech bloků, pak `'endf'`
+   d. Odeslat příkaz `'done'`
 2. Jinak (původní chování):
    - Zpracovat jako dosud (jeden soubor)
-```
 
 ### Fáze retrieve
 
-```
-1. Pokud --recursive:
-   a. Vytvořit prázdnou množinu seen_paths a seznam to_delete
+1. Pokud `--recursive`:
+   a. Vytvořit prázdnou množinu seen_paths a seznam `to_delete`
    b. Číst příkazy ze stdin (checksum výstup)
    c. Pro každý 'file' z dest:
       - Přidat cestu do seen_paths
       - Zkontrolovat on-demand, jestli soubor existuje na source
       - Pokud existuje: porovnat hashe, poslat 'file' + změněné data bloky + meta
       - Pokud neexistuje na source: přidat cestu do to_delete
-   d. Pro každý 'dire' z dest:
+   d. Pro každý `'dire'` z dest:
       - Přidat cestu do seen_paths
       - Zkontrolovat on-demand, jestli adresář existuje na source
-      - Pokud existuje: poslat 'dire' + dmet
-      - Pokud neexistuje na source: přidat cestu do to_delete
+      - Pokud existuje: poslat `'dire'` + dmet
+      - Pokud neexistuje na source: přidat cestu do `to_delete`
    e. Po 'done' ze stdin:
       - Projít source adresář (followlinks=True)
       - Pro každou položku která není v seen_paths: poslat jako novou
-      - Pokud --delete: poslat 'remv' pro položky v to_delete
-   f. Odeslat 'done'
+      - Pokud `--delete`: poslat 'remv' pro položky v `to_delete`
+   f. Odeslat `'done'`
 2. Jinak (původní chování):
    - Zpracovat jako dosud
-```
 
 ### Fáze save
 
-```
 1. Pokud --recursive:
    a. Vytvořit prázdný seznam pending_dir_metadata
    b. Zpracovat příkazy ze stdin:
@@ -281,7 +276,6 @@ done
    d. Skončit
 2. Jinak (původní chování):
    - Zpracovat jako dosud
-```
 
 **Poznámka:** Metadata adresářů (zejména mtime) se aplikují až na konci, protože vytváření souborů uvnitř adresáře by změnilo jeho mtime.
 
