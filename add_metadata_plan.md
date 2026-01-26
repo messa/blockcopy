@@ -34,13 +34,13 @@ int same_time(time_t f1_sec, unsigned long f1_nsec, time_t f2_sec, unsigned long
 
 **Klíčový poznatek:** Ve výchozím nastavení (`modify_window == 0`) rsync porovnává mtime **pouze na úrovni sekund**. Nanosekundy se použijí pouze s `--modify-window=-1`.
 
-### Co rsync kontroluje při `-a` (archive mode)
+### Co rsync kontroluje při rozhodování o přenosu obsahu
 
-S volbou `-a` rsync kontroluje:
-- Velikost souboru
-- Modification time (mtime)
-- Permissions (mode)
-- Owner/group (uid/gid)
+Rsync při "quick check" kontroluje **pouze**:
+- **Velikost souboru** (`st_size`)
+- **Modification time** (`st_mtime`) - ve výchozím nastavení jen sekundy
+
+**Permissions, owner a group NEOVLIVŇUJÍ rozhodnutí o přenosu obsahu!** Pokud se liší, rsync je pouze aktualizuje pomocí `set_file_attrs()`, ale obsah souboru nepřenáší (viz `generator.c:1809-1814`).
 
 ## Vyhodnocení: Splní tento plán cíl?
 
@@ -48,18 +48,22 @@ S volbou `-a` rsync kontroluje:
 
 1. **`--truncate`** se použije při save - zajistí shodnou velikost souboru
 2. **`--times`** se použije při save - zajistí shodný mtime (sekundy budou shodné)
-3. **`--perms`** se použije při `-a` rsync - zajistí shodná permissions
-4. **`--owner --group`** se použijí při `-a` rsync s root právy - zajistí shodného vlastníka
+
+Volby `--perms`, `--owner`, `--group` jsou **volitelné** pro rsync kompatibilitu - pokud se nepoužijí, rsync pouze aktualizuje atributy bez přenosu obsahu (rychlé)
 
 ### Doporučené použití pro rsync kompatibilitu
 
 ```bash
-# blockcopy s plnou kompatibilitou pro rsync -a
+# Minimální konfigurace pro rsync kompatibilitu (bez přenosu obsahu)
+blockcopy.py checksum /dest | ssh src blockcopy.py retrieve /src | \
+    blockcopy.py save --truncate --times /dest
+
+# Následný rsync nepřenese žádný obsah (pouze případně aktualizuje atributy)
+rsync -av /src/ /dest/
+
+# Pro úplnou shodu včetně atributů (rsync nic nezmění)
 blockcopy.py checksum /dest | ssh src blockcopy.py retrieve /src | \
     blockcopy.py save --truncate --times --perms --owner --group /dest
-
-# Následný rsync by měl říct "všechny soubory jsou aktuální"
-rsync -av /src/ /dest/
 ```
 
 ### Poznámky k přesnosti času
