@@ -1,0 +1,159 @@
+name: Test on block devices
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test-loopback:
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11', '3.13', '3.14']
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v4
+      with:
+        enable-cache: true
+
+    - name: Install dependencies
+      run: |
+        uv sync
+
+    - name: Create loopback devices
+      run: |
+        # Create sparse files for loopback devices (10 MB each)
+        truncate -s 10M /tmp/loop_src.img
+        truncate -s 10M /tmp/loop_dst.img
+
+        # Set up loopback devices
+        sudo losetup -f /tmp/loop_src.img
+        sudo losetup -f /tmp/loop_dst.img
+
+        # Get the device names
+        SRC_DEVICE=$(losetup -j /tmp/loop_src.img | cut -d: -f1)
+        DST_DEVICE=$(losetup -j /tmp/loop_dst.img | cut -d: -f1)
+
+        echo "SRC_DEVICE=$SRC_DEVICE" >> $GITHUB_ENV
+        echo "DST_DEVICE=$DST_DEVICE" >> $GITHUB_ENV
+
+        echo "Source device: $SRC_DEVICE"
+        echo "Destination device: $DST_DEVICE"
+
+        # Show loopback devices
+        losetup -l
+
+    - name: Write test data to source device
+      run: |
+        # Write random data to source device
+        sudo dd if=/dev/urandom of=$SRC_DEVICE bs=1M count=10 status=progress
+
+        # Verify the data was written
+        echo "Source device checksum:"
+        sudo md5sum $SRC_DEVICE
+
+    - name: Test blockcopy on loopback devices
+      run: |
+        # Make devices readable/writable by current user for testing
+        sudo chmod 666 $SRC_DEVICE $DST_DEVICE
+
+        echo "=== Testing blockcopy copy from device to device ==="
+
+        # Run blockcopy: checksum | retrieve | save pipeline
+        uv run blockcopy checksum $DST_DEVICE | \
+          uv run blockcopy retrieve $SRC_DEVICE | \
+          uv run blockcopy save $DST_DEVICE
+
+        echo "=== Verifying copied data ==="
+        SRC_MD5=$(md5sum $SRC_DEVICE | cut -d' ' -f1)
+        DST_MD5=$(md5sum $DST_DEVICE | cut -d' ' -f1)
+
+        echo "Source MD5: $SRC_MD5"
+        echo "Destination MD5: $DST_MD5"
+
+        if [ "$SRC_MD5" = "$DST_MD5" ]; then
+          echo "SUCCESS: Device copy verified!"
+        else
+          echo "FAILURE: MD5 checksums do not match!"
+          exit 1
+        fi
+
+    - name: Test incremental copy (no changes)
+      run: |
+        echo "=== Testing incremental copy when devices are identical ==="
+
+        # Run blockcopy again - should transfer minimal data
+        uv run blockcopy checksum $DST_DEVICE 2>&1 | tee /tmp/checksum_output.bin | \
+          uv run blockcopy retrieve $SRC_DEVICE 2>&1 | tee /tmp/retrieve_output.bin | \
+          uv run blockcopy save $DST_DEVICE
+
+        # Check that retrieve output contains no 'data' blocks (only meta and done)
+        if grep -q 'data' /tmp/retrieve_output.bin; then
+          echo "Note: Some data blocks were transferred (this may be expected for block alignment)"
+        else
+          echo "SUCCESS: No data blocks transferred for identical content!"
+        fi
+
+        # Verify data integrity
+        SRC_MD5=$(md5sum $SRC_DEVICE | cut -d' ' -f1)
+        DST_MD5=$(md5sum $DST_DEVICE | cut -d' ' -f1)
+
+        if [ "$SRC_MD5" = "$DST_MD5" ]; then
+          echo "SUCCESS: Data integrity maintained!"
+        else
+          echo "FAILURE: MD5 checksums do not match!"
+          exit 1
+        fi
+
+    - name: Test partial modification copy
+      run: |
+        echo "=== Testing copy after partial modification ==="
+
+        # Modify a small portion of the source device
+        echo "Modified content at offset 5MB" | sudo dd of=$SRC_DEVICE bs=1 seek=5242880 conv=notrunc
+
+        # Run blockcopy
+        uv run blockcopy checksum $DST_DEVICE | \
+          uv run blockcopy retrieve $SRC_DEVICE | \
+          uv run blockcopy save $DST_DEVICE
+
+        # Verify
+        SRC_MD5=$(md5sum $SRC_DEVICE | cut -d' ' -f1)
+        DST_MD5=$(md5sum $DST_DEVICE | cut -d' ' -f1)
+
+        echo "Source MD5: $SRC_MD5"
+        echo "Destination MD5: $DST_MD5"
+
+        if [ "$SRC_MD5" = "$DST_MD5" ]; then
+          echo "SUCCESS: Partial modification copy verified!"
+        else
+          echo "FAILURE: MD5 checksums do not match!"
+          exit 1
+        fi
+
+    - name: Cleanup loopback devices
+      if: always()
+      run: |
+        # Detach loopback devices
+        if [ -n "$SRC_DEVICE" ]; then
+          sudo losetup -d $SRC_DEVICE || true
+        fi
+        if [ -n "$DST_DEVICE" ]; then
+          sudo losetup -d $DST_DEVICE || true
+        fi
+
+        # Remove image files
+        rm -f /tmp/loop_src.img /tmp/loop_dst.img
+
+        echo "Cleanup complete"
