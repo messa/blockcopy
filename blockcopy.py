@@ -46,7 +46,7 @@ from pwd import getpwuid, getpwnam
 from queue import Queue
 from sys import exit, stderr, stdin, stdout
 from threading import Event, Lock
-from time import monotonic
+from time import monotonic, time_ns
 
 
 __version__ = '0.0.3'
@@ -311,7 +311,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                             if abs(now_ns - show_progress_last_output_time_ns) >= 60e9 or (show_progress_pct and show_progress_pct - show_progress_last_output_pct >= 5):
                                 elapsed_s = (now_ns - show_progress_last_output_time_ns) / 1e9
                                 bytes_since_last = block_pos - show_progress_last_output_pos
-                                speed_mb_s = bytes_since_last / 2**20 / elapsed if elapsed_s > 0 else 0
+                                speed_mb_s = bytes_since_last / 2**20 / elapsed_s if elapsed_s > 0 else 0
                                 show_progress_last_output_time_ns = now_ns
                                 show_progress_last_output_pct = show_progress_pct
                                 show_progress_last_output_pos = block_pos
