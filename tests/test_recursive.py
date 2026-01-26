@@ -381,3 +381,63 @@ def test_recursive_delete_directory(tmp_path, script_path):
 
     # Extra directory should be gone
     assert not (dst_dir / 'extra_dir').exists()
+
+
+def test_recursive_block_level_diff(tmp_path, script_path):
+    '''Test that only changed blocks are transferred, not entire files.'''
+    src_dir = tmp_path / 'src'
+    dst_dir = tmp_path / 'dst'
+    src_dir.mkdir()
+    dst_dir.mkdir()
+
+    # Create a file with 4 blocks (512KB total, block_size = 128KB)
+    block_size = 128 * 1024
+    block_a = b'A' * block_size
+    block_b = b'B' * block_size
+    block_c = b'C' * block_size
+    block_d = b'D' * block_size
+
+    src_file = src_dir / 'bigfile.bin'
+    src_file.write_bytes(block_a + block_b + block_c + block_d)
+
+    # First sync - copies everything
+    cmd1 = [executable, script_path, 'checksum', '-r', str(dst_dir)]
+    cmd2 = [executable, script_path, 'retrieve', '-r', str(src_dir)]
+    cmd3 = [executable, script_path, 'save', '-r', str(dst_dir)]
+
+    with ExitStack() as stack:
+        p1 = stack.enter_context(Popen(cmd1, stdin=PIPE, stdout=PIPE, stderr=PIPE))
+        p2 = stack.enter_context(Popen(cmd2, stdin=p1.stdout, stdout=PIPE, stderr=PIPE))
+        p3 = stack.enter_context(Popen(cmd3, stdin=p2.stdout, stderr=PIPE))
+
+        assert p1.wait() == 0, p1.stderr.read()
+        assert p2.wait() == 0, p2.stderr.read()
+        assert p3.wait() == 0, p3.stderr.read()
+
+    dst_file = dst_dir / 'bigfile.bin'
+    assert dst_file.read_bytes() == block_a + block_b + block_c + block_d
+
+    # Now modify only the second block in source
+    block_b_modified = b'X' * block_size
+    src_file.write_bytes(block_a + block_b_modified + block_c + block_d)
+
+    # Second sync - should only transfer the changed block
+    cmd1 = [executable, script_path, 'checksum', '-r', str(dst_dir)]
+    cmd2 = [executable, script_path, 'retrieve', '-r', str(src_dir)]
+    cmd3 = [executable, script_path, 'save', '-r', str(dst_dir)]
+
+    with ExitStack() as stack:
+        p1 = stack.enter_context(Popen(cmd1, stdin=PIPE, stdout=PIPE, stderr=PIPE))
+        p2 = stack.enter_context(Popen(cmd2, stdin=p1.stdout, stdout=PIPE, stderr=PIPE))
+        p3 = stack.enter_context(Popen(cmd3, stdin=p2.stdout, stderr=PIPE))
+
+        assert p1.wait() == 0, p1.stderr.read()
+        assert p2.wait() == 0, p2.stderr.read()
+        assert p3.wait() == 0, p3.stderr.read()
+
+    # Verify the file is correctly updated - unchanged blocks preserved, changed block updated
+    result = dst_file.read_bytes()
+    assert result[:block_size] == block_a, "First block should be unchanged"
+    assert result[block_size:2*block_size] == block_b_modified, "Second block should be updated"
+    assert result[2*block_size:3*block_size] == block_c, "Third block should be unchanged"
+    assert result[3*block_size:] == block_d, "Fourth block should be unchanged"

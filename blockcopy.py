@@ -1184,8 +1184,9 @@ def do_checksum_recursive(dir_path, input_stream, output_stream, show_progress=F
     '''
     Recursive checksum mode.
 
-    Scan destination directory and send file list with metadata.
-    This is a unidirectional protocol - we just send the list and finish.
+    Scan destination directory and send file list with block hashes.
+    For each file, we send metadata followed by SHA3-512 hashes of each 128KB block.
+    This enables block-level diff on the retrieve side.
     '''
     if output_stream.isatty():
         exit('ERROR (checksum): output_stream is a tty - will not write binary data to terminal')
@@ -1204,11 +1205,36 @@ def do_checksum_recursive(dir_path, input_stream, output_stream, show_progress=F
     output_stream.write(b'list')
     output_stream.write(total_entries.to_bytes(8, 'big'))
 
-    # Send all entries
+    # Send files with block hashes
     for entry in sorted(files, key=lambda e: e.path):
         write_file_entry(output_stream, entry)
+
+        # Now send block hashes for this file
+        file_path = dir_path / entry.path
+        try:
+            with open(file_path, 'rb') as f:
+                block_pos = 0
+                while True:
+                    block_data = f.read(block_size)
+                    if not block_data:
+                        break
+                    block_hash = hash_factory(block_data).digest()
+                    output_stream.write(b'Hash')
+                    output_stream.write(block_pos.to_bytes(8, 'big'))
+                    output_stream.write(len(block_data).to_bytes(4, 'big'))
+                    output_stream.write(block_hash)
+                    block_pos += len(block_data)
+        except OSError as e:
+            logger.warning('Failed to read file %s for hashing: %s', file_path, e)
+
+        # End of file hashes
+        output_stream.write(b'fend')
+
+    # Send directories
     for entry in sorted(dirs, key=lambda e: e.path):
         write_dir_entry(output_stream, entry)
+
+    # Send symlinks
     for entry in sorted(symlinks, key=lambda e: e.path):
         write_symlink_entry(output_stream, entry)
 
@@ -1220,12 +1246,11 @@ def do_checksum_recursive(dir_path, input_stream, output_stream, show_progress=F
 
 def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False, delete=False, verbose=False):
     '''
-    Recursive retrieve mode.
+    Recursive retrieve mode with block-level diff.
 
-    1. Receive file list from destination (unidirectional)
+    1. Receive file list with block hashes from destination
     2. Scan source directory
-    3. Compare and decide what to transfer
-    4. Send changed files entirely (no block-level diff in this simple version)
+    3. Compare block hashes and send only differing blocks
     '''
     if use_lzma:
         from lzma import compress as lzma_compress
@@ -1237,7 +1262,7 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
     if not dir_path.is_dir():
         exit(f'ERROR (retrieve): {dir_path} is not a directory')
 
-    # Read destination file list
+    # Read destination file list with hashes
     command = input_stream.read(4)
     if command != b'list':
         raise Exception(f'Expected list command, got {command!r}')
@@ -1245,6 +1270,8 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
     entry_count = int.from_bytes(input_stream.read(8), 'big')
     logger.debug('Receiving %d entries from destination', entry_count)
 
+    # Store destination entries with their block hashes
+    # dst_files: path -> (FileEntry, [(pos, size, hash), ...])
     dst_files = {}
     dst_dirs = {}
     dst_symlinks = {}
@@ -1253,7 +1280,22 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
         cmd = input_stream.read(4)
         if cmd == b'file':
             entry = read_file_entry(input_stream)
-            dst_files[entry.path] = entry
+            # Read block hashes until fend
+            block_hashes = []
+            while True:
+                hash_cmd = input_stream.read(4)
+                if hash_cmd == b'fend':
+                    break
+                elif hash_cmd == b'Hash':
+                    block_pos = int.from_bytes(input_stream.read(8), 'big')
+                    blk_size = int.from_bytes(input_stream.read(4), 'big')
+                    block_hash = input_stream.read(hash_digest_size)
+                    if len(block_hash) != hash_digest_size:
+                        raise IncompleteReadError('Incomplete block hash read')
+                    block_hashes.append((block_pos, blk_size, block_hash))
+                else:
+                    raise Exception(f'Expected Hash or fend, got {hash_cmd!r}')
+            dst_files[entry.path] = (entry, block_hashes)
         elif cmd == b'dirs':
             entry = read_dir_entry(input_stream)
             dst_dirs[entry.path] = entry
@@ -1322,25 +1364,19 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
 
     output_stream.flush()
 
-    # Process files
+    # Process files with block-level diff
     for path, src_entry in sorted(src_files_dict.items()):
-        dst_entry = dst_files.get(path)
+        dst_data = dst_files.get(path)
+        file_path = dir_path / path
 
-        # Check if file needs to be transferred
-        needs_transfer = False
-        if dst_entry is None:
-            needs_transfer = True
-            logger.debug('File %s: new file', path)
-        elif dst_entry.size != src_entry.size:
-            needs_transfer = True
-            logger.debug('File %s: size changed %d -> %d', path, dst_entry.size, src_entry.size)
-        elif dst_entry.mtime_ns != src_entry.mtime_ns:
-            needs_transfer = True
-            logger.debug('File %s: mtime changed', path)
-
-        if not needs_transfer:
-            logger.debug('File %s: unchanged', path)
-            continue
+        if dst_data is None:
+            # New file - send everything
+            logger.debug('File %s: new file, sending all blocks', path)
+            dst_hashes = {}
+        else:
+            dst_entry, block_hashes = dst_data
+            # Build hash lookup: position -> (size, hash)
+            dst_hashes = {pos: (size, h) for pos, size, h in block_hashes}
 
         # Signal start of file
         output_stream.write(b'FILE')
@@ -1348,9 +1384,10 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
         output_stream.write(len(path_bytes).to_bytes(2, 'big'))
         output_stream.write(path_bytes)
 
-        file_path = dir_path / path
+        blocks_sent = 0
+        blocks_skipped = 0
 
-        # Send entire file content
+        # Read source file and compare block by block
         with open(file_path, 'rb') as f:
             block_pos = 0
             while True:
@@ -1358,6 +1395,20 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
                 if not block_data:
                     break
 
+                # Check if this block matches destination
+                dst_block = dst_hashes.get(block_pos)
+                if dst_block is not None:
+                    dst_blk_size, dst_hash = dst_block
+                    if dst_blk_size == len(block_data):
+                        src_hash = hash_factory(block_data).digest()
+                        if src_hash == dst_hash:
+                            # Block matches, skip it
+                            blocks_skipped += 1
+                            block_pos += len(block_data)
+                            continue
+
+                # Block differs or is new - send it
+                blocks_sent += 1
                 if use_lzma:
                     compressed = lzma_compress(block_data)
                     if len(compressed) < len(block_data):
@@ -1378,10 +1429,12 @@ def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False,
 
                 block_pos += len(block_data)
 
-        # Send file metadata
-        output_stream.write(b'fend')  # file end
+        logger.debug('File %s: sent %d blocks, skipped %d blocks', path, blocks_sent, blocks_skipped)
 
-        # Send meta for this file
+        # Send file end marker
+        output_stream.write(b'fend')
+
+        # Send metadata for this file
         stat_result = file_path.stat()
         atime_ns = stat_result.st_atime_ns
         mtime_ns = stat_result.st_mtime_ns
