@@ -1008,3 +1008,78 @@ def preallocate_file(fd, size):
 - Včasné zjištění nedostatku místa (před zahájením přenosu dat)
 
 **Poznámka:** Toto bude implementováno jako součást --recursive.
+
+### File Attributes (chattr/lsattr)
+
+Linux filesystémy (ext2/3/4, XFS, btrfs) podporují speciální atributy souborů nastavované pomocí `chattr`.
+
+**Běžné atributy:**
+
+| Flag | Název | Popis |
+|------|-------|-------|
+| `i` | Immutable | Soubor nelze měnit, mazat, přejmenovávat ani linkovat |
+| `a` | Append-only | Do souboru lze pouze přidávat data (užitečné pro logy) |
+| `d` | No-dump | Soubor se přeskočí při `dump` zálohování |
+| `A` | No-atime | Neaktualizovat atime při čtení |
+| `S` | Synchronous | Změny se zapisují synchronně na disk |
+| `D` | Synchronous directory | Synchronní zápis pro adresář |
+| `e` | Extents | Soubor používá extenty (ext4, automaticky) |
+| `j` | Journaled | Data se zapisují do žurnálu před zápisem na disk |
+
+**Ukázka práce s atributy:**
+```bash
+# Zobrazení atributů
+lsattr soubor.txt
+# ----i--------e---- soubor.txt
+
+# Nastavení immutable
+sudo chattr +i soubor.txt
+
+# Odebrání immutable
+sudo chattr -i soubor.txt
+
+# Nastavení append-only (užitečné pro logy)
+sudo chattr +a /var/log/app.log
+
+# Rekurzivní nastavení
+sudo chattr -R +i /etc/important/
+```
+
+**Python API:**
+```python
+import fcntl
+import struct
+
+# Konstanty pro ioctl
+FS_IOC_GETFLAGS = 0x80086601
+FS_IOC_SETFLAGS = 0x40086602
+
+# Flags
+FS_IMMUTABLE_FL = 0x00000010
+FS_APPEND_FL = 0x00000020
+FS_NODUMP_FL = 0x00000040
+
+def get_file_attrs(path):
+    """Přečte file attributes."""
+    with open(path, 'r') as f:
+        buf = struct.pack('i', 0)
+        result = fcntl.ioctl(f.fileno(), FS_IOC_GETFLAGS, buf)
+        return struct.unpack('i', result)[0]
+
+def set_file_attrs(path, flags):
+    """Nastaví file attributes."""
+    with open(path, 'r') as f:
+        buf = struct.pack('i', flags)
+        fcntl.ioctl(f.fileno(), FS_IOC_SETFLAGS, buf)
+```
+
+**Use cases:**
+- Ochrana konfiguračních souborů před náhodnou změnou (`+i`)
+- Append-only logy pro audit trail (`+a`)
+- Optimalizace výkonu vypnutím atime (`+A`)
+
+**Proč neimplementujeme:**
+- Immutable soubory vyžadují root pro změnu - komplikuje přenos
+- Atributy jsou často specifické pro konkrétní deployment
+- rsync také standardně nepřenáší tyto atributy
+- Lze přidat jako budoucí rozšíření s volbou `--file-attrs`
