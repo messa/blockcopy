@@ -233,7 +233,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
 
         def read_worker():
             # Only one will run
-            nonlocal source_end_offset, show_progress
+            nonlocal source_end_offset
             show_progress_total_size = None
             show_progress_last_output_time_ns = time_ns()
             show_progress_last_output_pct = 0
