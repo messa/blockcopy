@@ -4,7 +4,7 @@
 
 Tento dokument popisuje návrh implementace volby `--recursive` pro nástroj blockcopy, která umožní synchronizaci celých adresářových stromů. Změny nejsou zpětně kompatibilní s verzí 0.0.3.
 
-**Typické use cases:** Primárním cílem blockcopy je efektivní kopírování LVM volumes, VM images (qcow2, raw), databázových datadirů (PostgreSQL, MySQL) a podobných velkých datových struktur. Tyto jsou typicky tvořeny běžnými adresáři a regular files bez speciálních atributů (xattr, ACL, hardlinky). Proto je podpora pokročilých filesystémových funkcí nízkou prioritou.
+**Typické use cases:** Primárním cílem blockcopy je efektivní kopírování LVM volumes, VM images (qcow2, raw), databázových datadirů (PostgreSQL, MySQL, MongoDB) a podobných velkých datových struktur. Tyto jsou typicky tvořeny běžnými adresáři a regular files bez speciálních atributů (xattr, ACL, hardlinky). Proto je podpora pokročilých filesystémových funkcí nízkou prioritou.
 
 ## Základní principy
 
