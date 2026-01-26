@@ -1,6 +1,74 @@
 # Plán: Přidat volby pro zachování metadata k příkazu save
 
-## Přehled
+## Cíl
+
+**Hlavní cíl:** Po synchronizaci souborů pomocí blockcopy by rsync měl považovat soubory za shodné a nezpracovávat je znovu.
+
+To umožní workflow, kde se blockcopy použije pro efektivní přenos velkých souborů (využívá blokový delta-transfer), a následný rsync pouze ověří, že soubory jsou shodné, aniž by je znovu přenášel.
+
+## Analýza: Jak rsync rozhoduje o přenosu souborů
+
+Rsync používá **"quick check" algoritmus** (viz `generator.c:617-671` ve zdrojovém kódu rsync):
+
+### Rozhodovací logika pro běžné soubory
+
+1. **Velikost** - pokud se liší `st_size`, soubor se přenese
+2. Pokud `--checksum`: porovná se checksum celého souboru (pomalé)
+3. Pokud `--size-only`: po ověření velikosti se soubor považuje za shodný
+4. Pokud `--ignore-times`: soubor se vždy přenese (ignoruje mtime)
+5. **Modification time (mtime)** - pokud se liší, soubor se přenese
+
+### Porovnání mtime (viz `util1.c:1408-1418`)
+
+```c
+int same_time(time_t f1_sec, unsigned long f1_nsec, time_t f2_sec, unsigned long f2_nsec)
+{
+    if (modify_window == 0)
+        return f1_sec == f2_sec;           // Výchozí: pouze sekundy!
+    if (modify_window < 0)
+        return f1_sec == f2_sec && f1_nsec == f2_nsec;  // I nanosekundy
+    // Kladná hodnota: toleruje rozdíl v sekundách
+    ...
+}
+```
+
+**Klíčový poznatek:** Ve výchozím nastavení (`modify_window == 0`) rsync porovnává mtime **pouze na úrovni sekund**. Nanosekundy se použijí pouze s `--modify-window=-1`.
+
+### Co rsync kontroluje při `-a` (archive mode)
+
+S volbou `-a` rsync kontroluje:
+- Velikost souboru
+- Modification time (mtime)
+- Permissions (mode)
+- Owner/group (uid/gid)
+
+## Vyhodnocení: Splní tento plán cíl?
+
+**ANO**, plánovaná úprava splní cíl, pokud:
+
+1. **`--truncate`** se použije při save - zajistí shodnou velikost souboru
+2. **`--times`** se použije při save - zajistí shodný mtime (sekundy budou shodné)
+3. **`--perms`** se použije při `-a` rsync - zajistí shodná permissions
+4. **`--owner --group`** se použijí při `-a` rsync s root právy - zajistí shodného vlastníka
+
+### Doporučené použití pro rsync kompatibilitu
+
+```bash
+# blockcopy s plnou kompatibilitou pro rsync -a
+blockcopy.py checksum /dest | ssh src blockcopy.py retrieve /src | \
+    blockcopy.py save --truncate --times --perms --owner --group /dest
+
+# Následný rsync by měl říct "všechny soubory jsou aktuální"
+rsync -av /src/ /dest/
+```
+
+### Poznámky k přesnosti času
+
+- blockcopy přenáší mtime s nanosekundovou přesností (`st_mtime_ns`)
+- rsync ve výchozím nastavení porovnává pouze sekundy
+- Sekundová složka bude po `os.utime(ns=...)` shodná → rsync bude spokojený
+
+## Přehled implementace
 
 Přidat volby `--times` (`-t`), `--perms` (`-p`), `--owner` (`-o`), `--group` (`-g`) k příkazu `save`, které způsobí nastavení příslušných metadata cílového souboru na hodnoty zdrojového souboru.
 
