@@ -11,4 +11,4 @@ def test_version(tmp_path, script_path, terminate_process):
         p1_output, p1_error = p1.communicate(input=None, timeout=5)
         assert p1.wait() == 0
         assert p1_error == b''
-        assert p1_output == b'blockcopy 0.0.2\n'
+        assert p1_output == b'blockcopy 0.0.3\n'
