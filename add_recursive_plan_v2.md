@@ -250,9 +250,11 @@ done
       - Poslat 'dire' + dmet
    e. Po 'done' ze stdin:
       - Identifikovat source položky bez dest protějšku (nové)
-      - Poslat 'file'/'dire' pro nové položky
+      - Seřadit nové položky deterministicky (abecedně podle cesty)
+      - Poslat 'file'/'dire' pro nové položky v tomto pořadí
       - Pokud --delete: identifikovat dest položky bez source protějšku
-      - Poslat 'remv' pro položky k smazání
+      - Seřadit položky k smazání sestupně podle hloubky cesty (potomci před rodiči)
+      - Poslat 'remv' pro položky k smazání v tomto pořadí
    f. Odeslat 'done'
 2. Jinak (původní chování):
    - Zpracovat jako dosud
@@ -294,10 +296,17 @@ blockcopy checksum --recursive /path/to/dest_dir | \
 Smazat soubory na dest, které neexistují na source:
 
 ```
-blockcopy save --recursive --delete /path/to/dest_dir
+blockcopy checksum --recursive /path/to/dest_dir | \
+  ssh srchost blockcopy retrieve --recursive --delete /path/to/source_dir | \
+  blockcopy save --recursive --delete /path/to/dest_dir
 ```
 
 **Výchozí chování**: bez `--delete` se soubory na dest zachovávají.
+
+**Bezpečnostní mechanismus**: 
+- Retrieve generuje příkazy `remv` pouze pokud je použito `--delete`
+- Save zpracovává příkazy `remv` pouze pokud je použito `--delete`
+- Pro správnou funkci musí být `--delete` použito jak na retrieve, tak na save straně
 
 ### Volba `--exclude` (budoucí rozšíření)
 
@@ -382,7 +391,7 @@ Podobný model:
 
 ### Fáze save
 
-Jednověláknové zpracování (jako dosud) - zápis musí být sekvenční.
+Jednovláknové zpracování (jako dosud) - zápis musí být sekvenční.
 
 ## Změny ve struktuře kódu
 
