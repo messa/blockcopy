@@ -268,6 +268,7 @@ done
         - Uložit metadata z `'dmet'` do `pending_dir_metadata`
       - Pro každý `'file'`:
         - Otevřít/vytvořit soubor
+        - Prealokovat místo pomocí `fallocate()` (pokud je známa velikost z `'meta'`)
         - Zapsat všechny přijaté `'data'` bloky
         - Truncate na velikost z `'meta'.total_size`
         - Aplikovat metadata z `'meta'`
@@ -819,3 +820,191 @@ Toto umožňuje:
 7. Podpora ACL
 8. Podpora sparse souborů
 9. Obousměrná synchronizace (mimo scope - komplikuje jednosměrný tok)
+10. Podpora hardlinků (zachování hardlink vztahů)
+
+## Příloha: Filesystémové funkce
+
+Tato sekce popisuje pokročilé filesystémové funkce, které blockcopy zatím nepodporuje, ale mohou být přidány v budoucnu.
+
+### Rozšířené atributy (xattr)
+
+Rozšířené atributy jsou páry klíč-hodnota připojené k souborům a adresářům mimo standardní metadata (permissions, timestamps).
+
+**Příklady použití:**
+- SELinux security labels (`security.selinux`)
+- Capabilities (`security.capability`)
+- Uživatelská metadata (`user.*`)
+- POSIX ACL uložené jako xattr (`system.posix_acl_access`)
+
+**Ukázka práce s xattr:**
+```bash
+# Nastavení xattr
+setfattr -n user.comment -v "důležitý soubor" soubor.txt
+
+# Čtení xattr
+getfattr -n user.comment soubor.txt
+# soubor.txt: user.comment="důležitý soubor"
+
+# Seznam všech xattr
+getfattr -d soubor.txt
+
+# SELinux context
+ls -Z soubor.txt
+# -rw-r--r--. user user unconfined_u:object_r:user_home_t:s0 soubor.txt
+```
+
+**Python API:**
+```python
+import os
+
+# Čtení
+value = os.getxattr('/path/to/file', 'user.comment')
+
+# Zápis
+os.setxattr('/path/to/file', 'user.comment', b'hodnota')
+
+# Seznam
+attrs = os.listxattr('/path/to/file')
+```
+
+**Use cases pro blockcopy:**
+- Zachování SELinux kontextu při kopírování mezi servery se SELinux
+- Přenos uživatelských metadat (tagy, komentáře)
+- Zachování capabilities pro executable soubory
+
+### Access Control Lists (ACL)
+
+ACL rozšiřují standardní UNIX permissions (owner/group/other) o možnost nastavit oprávnění pro libovolné uživatele a skupiny.
+
+**Ukázka práce s ACL:**
+```bash
+# Nastavení ACL - uživatel alice má právo číst
+setfacl -m u:alice:r-- soubor.txt
+
+# Nastavení ACL - skupina devs má právo číst a zapisovat
+setfacl -m g:devs:rw- soubor.txt
+
+# Zobrazení ACL
+getfacl soubor.txt
+# # file: soubor.txt
+# # owner: bob
+# # group: users
+# user::rw-
+# user:alice:r--
+# group::r--
+# group:devs:rw-
+# mask::rw-
+# other::r--
+
+# Default ACL pro adresář (dědí se na nové soubory)
+setfacl -d -m g:devs:rw- adresar/
+```
+
+**Python API:**
+```python
+import posix1e  # pylibacl
+
+# Čtení ACL
+acl = posix1e.ACL(file='/path/to/file')
+print(acl)
+
+# Kopírování ACL
+acl.applyto('/path/to/dest')
+```
+
+**Use cases pro blockcopy:**
+- Sdílené adresáře s komplexními oprávněními (více týmů, různé úrovně přístupu)
+- Webové servery s oddělením oprávnění pro různé aplikace
+- Zachování přístupu pro service accounts
+
+### XFS Project Quotas
+
+Project quotas umožňují nastavit diskové kvóty na libovolné adresářové stromy, nezávisle na uživatelích a skupinách.
+
+**Co je "project":**
+Project je číselný identifikátor (project ID) přiřazený adresářům a souborům. Všechny soubory se stejným project ID sdílejí společnou kvótu. Na rozdíl od user/group quotas není project vázán na existujícího uživatele.
+
+**Ukázka konfigurace:**
+```bash
+# /etc/projid - mapování názvů na project ID
+webapp:100
+logs:101
+backups:102
+
+# /etc/projects - mapování project ID na adresáře
+100:/var/www/webapp
+101:/var/log/webapp
+102:/backup/webapp
+
+# Inicializace project quota na adresáři
+xfs_quota -x -c 'project -s webapp' /mount
+
+# Nastavení kvóty (soft 8GB, hard 10GB)
+xfs_quota -x -c 'limit -p bsoft=8g bhard=10g webapp' /mount
+
+# Zobrazení využití
+xfs_quota -x -c 'report -p' /mount
+# Project ID       Used   Soft   Hard Warn/Grace
+# ---------- ---------- ---------- ---------- ------------
+# webapp       2048000  8388608 10485760  00 [--------]
+```
+
+**Atribut na souboru:**
+```bash
+# Zobrazení project ID souboru
+xfs_io -c 'lsattr -p' /var/www/webapp/index.html
+# 100 /var/www/webapp/index.html
+
+# Nastavení project ID
+xfs_io -c 'chattr -p 100' /var/www/webapp/newfile.txt
+```
+
+**Proč nepřenášíme:**
+- Project ID jsou specifické pro konkrétní server a jeho konfiguraci
+- Destination server má typicky jiné project ID mapování
+- Kvóty se nastavují na úrovni administrace, ne při kopírování dat
+
+### XFS Reflinks (Copy-on-Write)
+
+Reflinks umožňují vytvořit "lehkou kopii" souboru sdílením datových bloků. Bloky se skutečně zkopírují až při modifikaci (Copy-on-Write).
+
+**Ukázka:**
+```bash
+# Vytvoření reflink kopie (okamžité, bez kopírování dat)
+cp --reflink=always source.img dest.img
+
+# Nebo pomocí xfs_io
+xfs_io -c 'reflink source.img' dest.img
+```
+
+**Proč není relevantní pro blockcopy:**
+- Blockcopy je primárně pro síťový přenos mezi různými servery
+- Reflinks fungují pouze v rámci jednoho filesystému
+- Pro lokální kopírování na stejném XFS je vhodnější `cp --reflink` nebo rsync
+- Blockcopy přenáší data přes síť, takže reflink optimalizace není aplikovatelná
+
+### Preallocation (fallocate)
+
+`fallocate()` umožňuje předem alokovat místo pro soubor bez nutnosti zapisovat data. To může zrychlit zápis velkých souborů.
+
+**Použití v blockcopy:**
+Fáze save může před zápisem souboru prealokovat místo pomocí `fallocate()`:
+
+```python
+import os
+
+def preallocate_file(fd, size):
+    """Prealokuje místo pro soubor."""
+    try:
+        os.posix_fallocate(fd, 0, size)
+    except OSError:
+        # Fallback pro filesystémy bez podpory fallocate
+        pass
+```
+
+**Výhody:**
+- Rychlejší zápis (filesystem nemusí alokovat bloky během zápisu)
+- Menší fragmentace souborů
+- Včasné zjištění nedostatku místa (před zahájením přenosu dat)
+
+**Poznámka:** Toto bude implementováno jako součást --recursive.
