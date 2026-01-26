@@ -243,7 +243,7 @@ done
    c. Pro každý `'file'` z dest:
       - Přidat cestu do `seen_paths`
       - Zkontrolovat on-demand, jestli soubor existuje na source
-      - Pokud existuje: porovnat hashe, poslat `'file'` + změněné data bloky + `'meta'`
+      - Pokud existuje: porovnat hashe, poslat `'file'` + změněné datové bloky + `'meta'`
       - Pokud neexistuje na source: přidat cestu do `to_delete`
    d. Pro každý `'dire'` z dest:
       - Přidat cestu do `seen_paths`
@@ -762,7 +762,7 @@ Původní návrh používal obecný příkaz `entr` (entry) s polem typu. Odděl
 ### Žádné flags v protokolu retrieve → save
 
 Původní návrh obsahoval FLAG_NEW, FLAG_MODIFIED, FLAG_UNCHANGED pro indikaci akce. Tyto flags byly odstraněny, protože save může inferovat akci z přijatých dat:
-- Přišla `data` bloky → zapsat na dané pozice
+- Přišly bloky `data` → zapsat na dané pozice
 - Přišlo jen `meta` bez `data` → soubor beze změny, pouze aktualizovat metadata
 - Přišlo `remv` → smazat položku
 
