@@ -502,6 +502,76 @@ def test_rsync_sees_no_changes_with_full_metadata(tmp_path, script_path):
         f"rsync would make changes! itemize output:\n{result.stdout}"
 
 
+def test_rsync_with_nanoseconds_sees_no_changes(tmp_path, script_path):
+    """
+    With rsync --modify-window=-1 (nanosecond comparison), blockcopy
+    should still produce identical files because it preserves full
+    nanosecond precision via os.utime(ns=...).
+    """
+    src_file = tmp_path / 'src.bin'
+    dst_file = tmp_path / 'dst.bin'
+
+    test_content = b'Nanosecond precision test'
+    src_file.write_bytes(test_content)
+
+    # Set mtime with non-zero nanoseconds
+    mtime_ns = 1700000000_123456789  # Has nanosecond component
+    utime(src_file, ns=(mtime_ns, mtime_ns))
+
+    dst_file.write_bytes(b'X' * len(test_content))
+
+    # Run blockcopy with --truncate --times
+    p1 = subprocess.Popen(
+        ['python3', script_path, 'checksum', str(dst_file)],
+        stdout=subprocess.PIPE,
+    )
+    p2 = subprocess.Popen(
+        ['python3', script_path, 'retrieve', str(src_file)],
+        stdin=p1.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p1.stdout.close()
+    p3 = subprocess.Popen(
+        ['python3', script_path, 'save', '--truncate', '--times', str(dst_file)],
+        stdin=p2.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p2.stdout.close()
+
+    p3.communicate()
+    assert p1.wait() == 0
+    assert p2.wait() == 0
+    assert p3.wait() == 0
+
+    # Verify nanoseconds match exactly
+    src_stat = stat(src_file)
+    dst_stat = stat(dst_file)
+    assert src_stat.st_mtime_ns == dst_stat.st_mtime_ns, \
+        f"mtime_ns mismatch: src={src_stat.st_mtime_ns}, dst={dst_stat.st_mtime_ns}"
+
+    # Run rsync with --modify-window=-1 (nanosecond comparison)
+    result = subprocess.run(
+        [
+            'rsync',
+            '--dry-run',
+            '--itemize-changes',
+            '-a',
+            '--modify-window=-1',  # Compare nanoseconds too!
+            '--no-owner',
+            '--no-group',
+            '--no-perms',
+            str(src_file),
+            str(dst_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"rsync failed: {result.stderr}"
+    assert result.stdout.strip() == '', \
+        f"rsync --modify-window=-1 would transfer! output:\n{result.stdout}"
+
+
 def test_rsync_without_times_would_transfer(tmp_path, script_path):
     """
     Negative test: without --times, rsync SHOULD see differences
@@ -560,9 +630,12 @@ def test_rsync_without_times_would_transfer(tmp_path, script_path):
 
 1. **`test_rsync_sees_no_changes_after_blockcopy`** - hlavní test: po blockcopy s `--truncate --times` rsync nevidí žádné změny
 2. **`test_rsync_sees_no_changes_with_full_metadata`** - s plnými metadata (`--perms`) rsync také nic nemění
-3. **`test_rsync_without_times_would_transfer`** - negativní test: BEZ `--times` rsync VIDÍ rozdíl (mtime se liší)
+3. **`test_rsync_with_nanoseconds_sees_no_changes`** - test s `rsync --modify-window=-1` (nanosekundové porovnání) - ověřuje, že blockcopy zachovává plnou nanosekundovou přesnost
+4. **`test_rsync_without_times_would_transfer`** - negativní test: BEZ `--times` rsync VIDÍ rozdíl (mtime se liší)
 
 **Klíč k ověření:** `rsync --dry-run --itemize-changes` - prázdný výstup = soubory jsou shodné.
+
+**Poznámka k nanosekudnám:** rsync od verze 3.1.3 podporuje `--modify-window=-1` pro porovnávání nanosekund. blockcopy používá `os.utime(ns=...)` který zachovává plnou přesnost, takže je kompatibilní i s tímto režimem.
 
 ## Binární protokol - nový příkaz Meta
 
