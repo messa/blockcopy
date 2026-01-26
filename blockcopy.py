@@ -253,7 +253,10 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                                 f.seek(0)
                             except OSError:
                                 # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
-                                show_progress_total_size = None
+                                if environ.get('TOTAL_SIZE'):
+                                    show_progress_total_size = int(environ['TOTAL_SIZE'])
+                                else:
+                                    show_progress_total_size = None
                         else:
                             show_progress_total_size = end_offset - start_offset
 
@@ -311,7 +314,20 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                             if abs(now_ns - show_progress_last_output_time_ns) >= 60e9 or (show_progress_pct and show_progress_pct - show_progress_last_output_pct >= 5):
                                 elapsed_s = (now_ns - show_progress_last_output_time_ns) / 1e9
                                 bytes_since_last = block_pos - show_progress_last_output_pos
-                                speed_mb_s = bytes_since_last / 2**20 / elapsed_s if elapsed_s > 0 else 0
+                                speed_bytes_s = bytes_since_last / elapsed_s if elapsed_s > 0 else 0
+                                speed_mb_s = speed_bytes_s / 2**20
+                                speed_gb_h = speed_mb_s * 3600 / 1024
+                                if show_progress_total_size and speed_bytes_s > 0:
+                                    remaining_bytes = show_progress_total_size - (block_pos - start_offset)
+                                    eta_seconds = remaining_bytes / speed_bytes_s
+                                    eta_minutes, eta_secs = divmod(int(eta_seconds), 60)
+                                    eta_hours, eta_mins = divmod(eta_minutes, 60)
+                                    if eta_hours > 0:
+                                        eta_str = f'{eta_hours}h {eta_mins:02d}m'
+                                    else:
+                                        eta_str = f'{eta_mins}m {eta_secs:02d}s'
+                                else:
+                                    eta_str = '?'
                                 show_progress_last_output_time_ns = now_ns
                                 show_progress_last_output_pct = show_progress_pct
                                 show_progress_last_output_pos = block_pos
@@ -319,7 +335,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                                 show_progress_pct_str = f'{show_progress_pct:5.2f} %' if show_progress_pct else '? %'
                                 print(
                                     f'Checksum progress: {block_pos/2**30:7.2f} GB / {show_progress_total_size_str}'
-                                    f' ({show_progress_pct_str}) {speed_mb_s:7.2f} MB/s',
+                                    f'  ({show_progress_pct_str}) {speed_mb_s:7.2f} MB/s ({speed_gb_h:6.1f} GB/h)  ETA {eta_str}',
                                     file=stderr,
                                     flush=True)
 
