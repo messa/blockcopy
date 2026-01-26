@@ -235,7 +235,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
             # Only one will run
             nonlocal source_end_offset, show_progress
             show_progress_total_size = None
-            show_progress_last_output_time = monotonic()
+            show_progress_last_output_time_ns = time_ns()
             show_progress_last_output_pct = 0
             show_progress_last_output_pos = start_offset
             try:
@@ -253,7 +253,7 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                                 f.seek(0)
                             except OSError:
                                 # Probably `[Errno 29] Illegal seek` when reading from pipe e.g. from pv command
-                                show_progress = False
+                                show_progress_total_size = None
                         else:
                             show_progress_total_size = end_offset - start_offset
 
@@ -303,18 +303,23 @@ def do_checksum(file_path, hash_output_stream, start_offset, end_offset, show_pr
                         del block_data_batch
 
                         if show_progress:
-                            show_progress_pct = 100 * (block_pos - start_offset) / show_progress_total_size
-                            if monotonic() - show_progress_last_output_time >= 60 or show_progress_pct - show_progress_last_output_pct >= 5:
-                                now = monotonic()
-                                elapsed = now - show_progress_last_output_time
+                            if show_progress_total_size:
+                                show_progress_pct = (100 * (block_pos - start_offset) / show_progress_total_size)
+                            else:
+                                show_progress_pct = None  # e.g. when processing a pipe we don't know the total size beforehand
+                            now_ns = time_ns()
+                            if abs(now_ns - show_progress_last_output_time_ns) >= 60e9 or (show_progress_pct and show_progress_pct - show_progress_last_output_pct >= 5):
+                                elapsed_s = (now_ns - show_progress_last_output_time_ns) / 1e9
                                 bytes_since_last = block_pos - show_progress_last_output_pos
-                                speed_mb_s = (bytes_since_last / (1024 * 1024)) / elapsed if elapsed > 0 else 0
-                                show_progress_last_output_time = now
+                                speed_mb_s = bytes_since_last / 2**20 / elapsed if elapsed_s > 0 else 0
+                                show_progress_last_output_time_ns = now_ns
                                 show_progress_last_output_pct = show_progress_pct
                                 show_progress_last_output_pos = block_pos
+                                show_progress_total_size_str = f'{show_progress_total_size/2**30:.2f} GB' if show_progress_total_size else '?'
+                                show_progress_pct_str = f'{show_progress_pct:5.2f} %' if show_progress_pct else '? %'
                                 print(
-                                    f'Checksum progress: {block_pos/2**30:7.2f} GB / {show_progress_total_size/2**30:.2f} GB'
-                                    f' ({show_progress_pct:5.2f}%) {speed_mb_s:7.1f} MB/s',
+                                    f'Checksum progress: {block_pos/2**30:7.2f} GB / {show_progress_total_size_str}'
+                                    f' ({show_progress_pct_str}) {speed_mb_s:7.2f} MB/s',
                                     file=stderr,
                                     flush=True)
 
