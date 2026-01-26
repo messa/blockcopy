@@ -239,20 +239,22 @@ done
 
 ```
 1. Pokud --recursive:
-   a. Načíst manifest položek ze source adresáře (followlinks=True)
+   a. Vytvořit prázdnou množinu seen_paths a seznam to_delete
    b. Číst příkazy ze stdin (checksum výstup)
    c. Pro každý 'file' z dest:
-      - Najít odpovídající source soubor
-      - Porovnat hashe bloků
-      - Poslat 'file' + změněné data bloky + meta
+      - Přidat cestu do seen_paths
+      - Zkontrolovat on-demand, jestli soubor existuje na source
+      - Pokud existuje: porovnat hashe, poslat 'file' + změněné data bloky + meta
+      - Pokud neexistuje na source: přidat cestu do to_delete
    d. Pro každý 'dire' z dest:
-      - Najít odpovídající source adresář
-      - Poslat 'dire' + dmet
+      - Přidat cestu do seen_paths
+      - Zkontrolovat on-demand, jestli adresář existuje na source
+      - Pokud existuje: poslat 'dire' + dmet
+      - Pokud neexistuje na source: přidat cestu do to_delete
    e. Po 'done' ze stdin:
-      - Identifikovat source položky bez dest protějšku (nové)
-      - Poslat 'file'/'dire' pro nové položky
-      - Pokud --delete: identifikovat dest položky bez source protějšku
-      - Poslat 'remv' pro položky k smazání
+      - Projít source adresář (followlinks=True)
+      - Pro každou položku která není v seen_paths: poslat jako novou
+      - Pokud --delete: poslat 'remv' pro položky v to_delete
    f. Odeslat 'done'
 2. Jinak (původní chování):
    - Zpracovat jako dosud
@@ -396,12 +398,6 @@ def walk_directory(path: Path, followlinks: bool = True) -> Iterator[Tuple[Path,
 
     Položky jsou seřazené abecedně podle cesty.
     Symlinky se následují (followlinks=True).
-    """
-
-def read_directory_manifest(path: Path) -> Dict[str, DirEntry]:
-    """
-    Načte manifest zdrojového adresáře do paměti.
-    Klíč je relativní cesta, hodnota je DirEntry.
     """
 
 def send_file_header(out: IO, path: str, size: int):
@@ -679,8 +675,8 @@ def test_recursive_disk_full():
 
 ### Fáze 3: Retrieve s --recursive
 
-1. Implementovat `read_directory_manifest()`
-2. Rozšířit `main_retrieve()` o větev pro `--recursive`
+1. Rozšířit `main_retrieve()` o větev pro `--recursive`
+2. Implementovat on-demand kontrolu existence souborů/adresářů na source
 3. Implementovat porovnávání hashů a odesílání změněných bloků
 4. Implementovat generování příkazů `remv` pro smazání (s --delete)
 5. Napsat testy pro retrieve fázi
@@ -704,9 +700,9 @@ def test_recursive_disk_full():
 
 ### Paměťové nároky
 
-- Manifest source adresáře se načte celý do paměti
-- Pro velmi velké adresáře (miliony souborů) zvážit streaming přístup
-- Odhad: 1M souborů ≈ 200-500 MB RAM pro manifest
+- Množina `seen_paths` se ukládá do paměti (pro detekci nových položek na source)
+- Seznam `to_delete` se ukládá do paměti (pro mazání položek chybějících na source)
+- Odhad: 1M souborů ≈ 100-200 MB RAM pro cesty
 
 ### I/O optimalizace
 
