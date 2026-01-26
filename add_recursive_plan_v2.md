@@ -357,6 +357,31 @@ Pokud se typ položky změní (soubor → adresář nebo adresář → soubor):
 - Pokud nelze přečíst soubor (PermissionError), vypsat varování na stderr a přeskočit
 - Volba `--ignore-errors` pro pokračování i při chybách (budoucí rozšíření)
 
+### Speciální soubory
+
+Device nodes, sockets, named pipes (FIFOs) a další speciální soubory:
+- Ignorovat (nepřenášet)
+- Vypsat varování na stderr
+
+### Hardlinky
+
+Hardlinky na stejný inode:
+- Přenést jako samostatné soubory (každý hardlink se stane nezávislou kopií)
+- Pokusit se hardlinky detekovat (sledovat inode) a vypsat varování na stderr
+- Budoucí rozšíření může přidat podporu pro zachování hardlinků
+
+### Nevalidní UTF-8 v cestách
+
+Některé filesystémy (např. Linux ext4) povolují libovolné byty v názvech souborů:
+- Soubory s nevalidním UTF-8 v cestě přeskočit
+- Vypsat varování na stderr
+
+### Sparse soubory
+
+Sparse soubory (soubory s "děrami"):
+- Přenášejí se jako plné soubory (nuly se přenesou jako data)
+- Budoucí rozšíření může přidat podporu pro detekci a zachování sparse regionů
+
 ### Pořadí vytváření
 
 Adresáře se musí vytvářet před soubory, které obsahují:
