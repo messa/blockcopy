@@ -2,8 +2,11 @@ from contextlib import ExitStack
 from subprocess import Popen, PIPE, DEVNULL
 from sys import executable
 
+import blockcopy
+
 
 def test_version(tmp_path, script_path, terminate_process):
+    assert blockcopy.__version__ == '0.0.3'
     cmd1 = [executable, script_path, '--version']
     with ExitStack() as stack:
         p1 = stack.enter_context(Popen(cmd1, stdin=DEVNULL, stdout=PIPE, stderr=PIPE))
