@@ -264,22 +264,26 @@ done
 
 ```
 1. Pokud --recursive:
-   a. Zpracovat příkazy ze stdin
-   b. Pro každý 'dire':
-      - Vytvořit adresář (pokud neexistuje)
-      - Aplikovat metadata z 'dmet'
-   c. Pro každý 'file':
-      - Otevřít/vytvořit soubor
-      - Zapsat všechny přijaté 'data' bloky
-      - Truncate na velikost z 'meta.total_size'
-      - Aplikovat metadata z 'meta'
-   d. Pro každý 'remv':
-      - Smazat soubor nebo adresář (rekurzivně)
-   e. Aplikovat metadata podle --times, --perms, --owner, --group
-   f. Po 'done' skončit
+   a. Vytvořit prázdný seznam pending_dir_metadata
+   b. Zpracovat příkazy ze stdin:
+      - Pro každý 'dire':
+        - Vytvořit adresář (pokud neexistuje)
+        - Uložit metadata z 'dmet' do pending_dir_metadata
+      - Pro každý 'file':
+        - Otevřít/vytvořit soubor
+        - Zapsat všechny přijaté 'data' bloky
+        - Truncate na velikost z 'meta.total_size'
+        - Aplikovat metadata z 'meta'
+      - Pro každý 'remv':
+        - Smazat soubor nebo adresář (rekurzivně)
+   c. Po 'done':
+      - Aplikovat metadata adresářů z pending_dir_metadata (v opačném pořadí - potomci před rodiči)
+   d. Skončit
 2. Jinak (původní chování):
    - Zpracovat jako dosud
 ```
+
+**Poznámka:** Metadata adresářů (zejména mtime) se aplikují až na konci, protože vytváření souborů uvnitř adresáře by změnilo jeho mtime.
 
 ## Nové CLI volby
 
@@ -312,6 +316,13 @@ blockcopy checksum --recursive --exclude "*.pyc" --exclude "__pycache__" /path/t
 Poznámka: Implementace `--exclude` může být přidána v budoucí verzi.
 
 ## Řešení okrajových případů
+
+### Neexistující dest adresář
+
+Pokud cílový adresář neexistuje:
+- Checksum nemá co procházet, pošle pouze `done`
+- Retrieve pošle všechny položky ze source jako nové
+- Save vytvoří celou strukturu od začátku
 
 ### Prázdné adresáře
 
