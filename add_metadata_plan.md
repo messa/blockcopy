@@ -342,6 +342,228 @@ def test_copy_with_metadata(tmp_path, script_path, use_times, use_perms):
         assert dst_stat_after.st_mode == src_stat.st_mode
 ```
 
+### Testy pro rsync kompatibilitu
+
+Nový soubor `tests/test_rsync_compat.py`:
+
+```python
+import subprocess
+from os import chmod, stat, utime
+from pathlib import Path
+
+import pytest
+
+
+def test_rsync_sees_no_changes_after_blockcopy(tmp_path, script_path):
+    """
+    After blockcopy sync with --truncate --times, rsync should see
+    no differences and transfer nothing.
+    """
+    # Setup: create source file with specific content and metadata
+    src_dir = tmp_path / 'src'
+    src_dir.mkdir()
+    src_file = src_dir / 'testfile.bin'
+
+    test_content = b'Hello World! ' * 1000  # ~13KB
+    src_file.write_bytes(test_content)
+
+    # Set specific mtime (not "now" to avoid race conditions)
+    # Use a time in the past with zero nanoseconds for clean comparison
+    fixed_mtime_ns = 1700000000_000000000  # 2023-11-14 22:13:20 UTC
+    utime(src_file, ns=(fixed_mtime_ns, fixed_mtime_ns))
+
+    # Setup: create destination file (different content, will be overwritten)
+    dst_dir = tmp_path / 'dst'
+    dst_dir.mkdir()
+    dst_file = dst_dir / 'testfile.bin'
+    dst_file.write_bytes(b'X' * len(test_content))  # Same size, different content
+
+    # Run blockcopy pipeline with --truncate --times
+    p1 = subprocess.Popen(
+        ['python3', script_path, 'checksum', str(dst_file)],
+        stdout=subprocess.PIPE,
+    )
+    p2 = subprocess.Popen(
+        ['python3', script_path, 'retrieve', str(src_file)],
+        stdin=p1.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p1.stdout.close()
+    p3 = subprocess.Popen(
+        ['python3', script_path, 'save', '--truncate', '--times', str(dst_file)],
+        stdin=p2.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p2.stdout.close()
+
+    p3.communicate()
+    assert p1.wait() == 0
+    assert p2.wait() == 0
+    assert p3.wait() == 0
+
+    # Verify content was synced
+    assert dst_file.read_bytes() == test_content
+
+    # Verify mtime matches (at least seconds)
+    src_stat = stat(src_file)
+    dst_stat = stat(dst_file)
+    assert int(src_stat.st_mtime) == int(dst_stat.st_mtime), \
+        f"mtime mismatch: src={src_stat.st_mtime}, dst={dst_stat.st_mtime}"
+
+    # NOW: Run rsync --dry-run --itemize-changes and verify NO transfers
+    result = subprocess.run(
+        [
+            'rsync',
+            '--dry-run',
+            '--itemize-changes',  # Shows what would be transferred
+            '-a',                 # Archive mode
+            '--no-owner',         # Skip owner check (we didn't sync owner)
+            '--no-group',         # Skip group check (we didn't sync group)
+            '--no-perms',         # Skip perms check (we didn't sync perms)
+            str(src_file),
+            str(dst_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, f"rsync failed: {result.stderr}"
+
+    # itemize-changes output should be empty if no transfer needed
+    assert result.stdout.strip() == '', \
+        f"rsync would transfer file! itemize output:\n{result.stdout}"
+
+
+def test_rsync_sees_no_changes_with_full_metadata(tmp_path, script_path):
+    """
+    After blockcopy sync with all metadata options, rsync -a should see
+    no differences at all.
+    """
+    src_dir = tmp_path / 'src'
+    src_dir.mkdir()
+    src_file = src_dir / 'testfile.bin'
+
+    test_content = b'Test content for full metadata sync'
+    src_file.write_bytes(test_content)
+
+    # Set specific metadata
+    chmod(src_file, 0o644)
+    fixed_mtime_ns = 1700000000_000000000
+    utime(src_file, ns=(fixed_mtime_ns, fixed_mtime_ns))
+
+    dst_dir = tmp_path / 'dst'
+    dst_dir.mkdir()
+    dst_file = dst_dir / 'testfile.bin'
+    dst_file.write_bytes(b'-' * len(test_content))
+
+    # Run blockcopy with full metadata
+    p1 = subprocess.Popen(
+        ['python3', script_path, 'checksum', str(dst_file)],
+        stdout=subprocess.PIPE,
+    )
+    p2 = subprocess.Popen(
+        ['python3', script_path, 'retrieve', str(src_file)],
+        stdin=p1.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p1.stdout.close()
+    p3 = subprocess.Popen(
+        ['python3', script_path, 'save',
+         '--truncate', '--times', '--perms',
+         str(dst_file)],
+        stdin=p2.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p2.stdout.close()
+
+    p3.communicate()
+    assert p1.wait() == 0
+    assert p2.wait() == 0
+    assert p3.wait() == 0
+
+    # Run rsync -a (without --no-owner/group since we're not root anyway)
+    result = subprocess.run(
+        [
+            'rsync',
+            '--dry-run',
+            '--itemize-changes',
+            '-a',
+            '--no-owner',  # Can't test owner without root
+            '--no-group',  # Can't test group without root
+            str(src_file),
+            str(dst_file),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout.strip() == '', \
+        f"rsync would make changes! itemize output:\n{result.stdout}"
+
+
+def test_rsync_without_times_would_transfer(tmp_path, script_path):
+    """
+    Negative test: without --times, rsync SHOULD see differences
+    (because mtime won't match).
+    """
+    src_file = tmp_path / 'src.bin'
+    dst_file = tmp_path / 'dst.bin'
+
+    test_content = b'Test'
+    src_file.write_bytes(test_content)
+
+    # Set old mtime on source
+    old_mtime_ns = 1600000000_000000000
+    utime(src_file, ns=(old_mtime_ns, old_mtime_ns))
+
+    dst_file.write_bytes(b'X' * len(test_content))
+
+    # Run blockcopy WITHOUT --times
+    p1 = subprocess.Popen(
+        ['python3', script_path, 'checksum', str(dst_file)],
+        stdout=subprocess.PIPE,
+    )
+    p2 = subprocess.Popen(
+        ['python3', script_path, 'retrieve', str(src_file)],
+        stdin=p1.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p1.stdout.close()
+    p3 = subprocess.Popen(
+        ['python3', script_path, 'save', '--truncate', str(dst_file)],
+        stdin=p2.stdout,
+        stdout=subprocess.PIPE,
+    )
+    p2.stdout.close()
+
+    p3.communicate()
+    assert p1.wait() == 0
+    assert p2.wait() == 0
+    assert p3.wait() == 0
+
+    # rsync SHOULD see difference (mtime differs)
+    result = subprocess.run(
+        ['rsync', '--dry-run', '--itemize-changes', '-a',
+         '--no-owner', '--no-group', '--no-perms',
+         str(src_file), str(dst_file)],
+        capture_output=True,
+        text=True,
+    )
+
+    # Expect non-empty output (rsync would transfer)
+    assert result.stdout.strip() != '', \
+        "rsync should see mtime difference without --times!"
+```
+
+**Vysvětlení testů:**
+
+1. **`test_rsync_sees_no_changes_after_blockcopy`** - hlavní test: po blockcopy s `--truncate --times` rsync nevidí žádné změny
+2. **`test_rsync_sees_no_changes_with_full_metadata`** - s plnými metadata (`--perms`) rsync také nic nemění
+3. **`test_rsync_without_times_would_transfer`** - negativní test: BEZ `--times` rsync VIDÍ rozdíl (mtime se liší)
+
+**Klíč k ověření:** `rsync --dry-run --itemize-changes` - prázdný výstup = soubory jsou shodné.
+
 ## Binární protokol - nový příkaz Meta
 
 Formát:
