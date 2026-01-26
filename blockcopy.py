@@ -49,7 +49,7 @@ from threading import Event, Lock
 from time import monotonic
 
 
-__version__ = '0.0.2'
+__version__ = '0.0.3'
 
 logger = getLogger(__name__)
 
