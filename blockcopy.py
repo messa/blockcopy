@@ -37,13 +37,17 @@ from argparse import ArgumentParser
 from base64 import b64encode
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
+from dataclasses import dataclass
 from grp import getgrgid, getgrnam
 from hashlib import sha3_512
 from logging import getLogger
-from os import chmod, chown, cpu_count, environ, getpid, kill, SEEK_END, utime
+from os import chmod, chown, cpu_count, environ, getpid, kill, readlink, SEEK_END, symlink, utime, walk
+from os import remove as os_remove
 from pathlib import Path
 from pwd import getpwuid, getpwnam
 from queue import Queue
+from shutil import rmtree
+from stat import S_ISREG
 from sys import exit, stderr, stdin, stdout
 from threading import Event, Lock
 from time import monotonic, time_ns
@@ -122,6 +126,229 @@ def get_group_name_by_gid(gid):
         return ''
 
 
+# Entry types for recursive mode
+ENTRY_FILE = 0
+ENTRY_DIR = 1
+ENTRY_SYMLINK = 2
+
+
+@dataclass
+class FileEntry:
+    '''Represents a file in directory listing.'''
+    path: str  # relative path
+    size: int
+    mtime_ns: int
+    mode: int
+    uid: int
+    gid: int
+    owner_name: str
+    group_name: str
+
+
+@dataclass
+class DirEntry:
+    '''Represents a directory in directory listing.'''
+    path: str  # relative path
+    mtime_ns: int
+    mode: int
+    uid: int
+    gid: int
+    owner_name: str
+    group_name: str
+
+
+@dataclass
+class SymlinkEntry:
+    '''Represents a symlink in directory listing.'''
+    path: str  # relative path
+    target: str
+    mtime_ns: int
+    uid: int
+    gid: int
+
+
+def scan_directory(base_path):
+    '''
+    Scan directory recursively and return list of entries.
+    Returns tuple of (files, dirs, symlinks).
+    '''
+    base_path = Path(base_path).resolve()
+    files = []
+    dirs = []
+    symlinks = []
+
+    for root, dirnames, filenames in walk(base_path, followlinks=False):
+        root_path = Path(root)
+        rel_root = root_path.relative_to(base_path)
+
+        # Process directories
+        for dirname in dirnames:
+            dir_path = root_path / dirname
+            rel_path = str(rel_root / dirname) if str(rel_root) != '.' else dirname
+
+            if dir_path.is_symlink():
+                # It's a symlink to a directory
+                try:
+                    stat_result = dir_path.lstat()
+                    target = readlink(dir_path)
+                    symlinks.append(SymlinkEntry(
+                        path=rel_path,
+                        target=target,
+                        mtime_ns=stat_result.st_mtime_ns,
+                        uid=stat_result.st_uid,
+                        gid=stat_result.st_gid,
+                    ))
+                except OSError as e:
+                    logger.warning('Failed to read symlink %s: %s', dir_path, e)
+            else:
+                try:
+                    stat_result = dir_path.stat()
+                    dirs.append(DirEntry(
+                        path=rel_path,
+                        mtime_ns=stat_result.st_mtime_ns,
+                        mode=stat_result.st_mode,
+                        uid=stat_result.st_uid,
+                        gid=stat_result.st_gid,
+                        owner_name=get_user_name_by_uid(stat_result.st_uid),
+                        group_name=get_group_name_by_gid(stat_result.st_gid),
+                    ))
+                except OSError as e:
+                    logger.warning('Failed to stat directory %s: %s', dir_path, e)
+
+        # Process files
+        for filename in filenames:
+            file_path = root_path / filename
+            rel_path = str(rel_root / filename) if str(rel_root) != '.' else filename
+
+            if file_path.is_symlink():
+                try:
+                    stat_result = file_path.lstat()
+                    target = readlink(file_path)
+                    symlinks.append(SymlinkEntry(
+                        path=rel_path,
+                        target=target,
+                        mtime_ns=stat_result.st_mtime_ns,
+                        uid=stat_result.st_uid,
+                        gid=stat_result.st_gid,
+                    ))
+                except OSError as e:
+                    logger.warning('Failed to read symlink %s: %s', file_path, e)
+            else:
+                try:
+                    stat_result = file_path.stat()
+                    if S_ISREG(stat_result.st_mode):
+                        files.append(FileEntry(
+                            path=rel_path,
+                            size=stat_result.st_size,
+                            mtime_ns=stat_result.st_mtime_ns,
+                            mode=stat_result.st_mode,
+                            uid=stat_result.st_uid,
+                            gid=stat_result.st_gid,
+                            owner_name=get_user_name_by_uid(stat_result.st_uid),
+                            group_name=get_group_name_by_gid(stat_result.st_gid),
+                        ))
+                    else:
+                        logger.warning('Skipping non-regular file: %s', file_path)
+                except OSError as e:
+                    logger.warning('Failed to stat file %s: %s', file_path, e)
+
+    return files, dirs, symlinks
+
+
+def write_file_entry(stream, entry):
+    '''Write FileEntry to binary stream.'''
+    path_bytes = entry.path.encode('utf-8')
+    owner_bytes = entry.owner_name.encode('utf-8')
+    group_bytes = entry.group_name.encode('utf-8')
+    stream.write(b'file')
+    stream.write(len(path_bytes).to_bytes(2, 'big'))
+    stream.write(path_bytes)
+    stream.write(entry.size.to_bytes(8, 'big'))
+    stream.write(entry.mtime_ns.to_bytes(8, 'big', signed=True))
+    stream.write(entry.mode.to_bytes(4, 'big'))
+    stream.write(entry.uid.to_bytes(4, 'big'))
+    stream.write(entry.gid.to_bytes(4, 'big'))
+    stream.write(len(owner_bytes).to_bytes(2, 'big'))
+    stream.write(owner_bytes)
+    stream.write(len(group_bytes).to_bytes(2, 'big'))
+    stream.write(group_bytes)
+
+
+def write_dir_entry(stream, entry):
+    '''Write DirEntry to binary stream.'''
+    path_bytes = entry.path.encode('utf-8')
+    owner_bytes = entry.owner_name.encode('utf-8')
+    group_bytes = entry.group_name.encode('utf-8')
+    stream.write(b'dirs')
+    stream.write(len(path_bytes).to_bytes(2, 'big'))
+    stream.write(path_bytes)
+    stream.write(entry.mtime_ns.to_bytes(8, 'big', signed=True))
+    stream.write(entry.mode.to_bytes(4, 'big'))
+    stream.write(entry.uid.to_bytes(4, 'big'))
+    stream.write(entry.gid.to_bytes(4, 'big'))
+    stream.write(len(owner_bytes).to_bytes(2, 'big'))
+    stream.write(owner_bytes)
+    stream.write(len(group_bytes).to_bytes(2, 'big'))
+    stream.write(group_bytes)
+
+
+def write_symlink_entry(stream, entry):
+    '''Write SymlinkEntry to binary stream.'''
+    path_bytes = entry.path.encode('utf-8')
+    target_bytes = entry.target.encode('utf-8')
+    stream.write(b'link')
+    stream.write(len(path_bytes).to_bytes(2, 'big'))
+    stream.write(path_bytes)
+    stream.write(len(target_bytes).to_bytes(2, 'big'))
+    stream.write(target_bytes)
+    stream.write(entry.mtime_ns.to_bytes(8, 'big', signed=True))
+    stream.write(entry.uid.to_bytes(4, 'big'))
+    stream.write(entry.gid.to_bytes(4, 'big'))
+
+
+def read_file_entry(stream):
+    '''Read FileEntry from binary stream.'''
+    path_len = int.from_bytes(stream.read(2), 'big')
+    path = stream.read(path_len).decode('utf-8')
+    size = int.from_bytes(stream.read(8), 'big')
+    mtime_ns = int.from_bytes(stream.read(8), 'big', signed=True)
+    mode = int.from_bytes(stream.read(4), 'big')
+    uid = int.from_bytes(stream.read(4), 'big')
+    gid = int.from_bytes(stream.read(4), 'big')
+    owner_len = int.from_bytes(stream.read(2), 'big')
+    owner_name = stream.read(owner_len).decode('utf-8')
+    group_len = int.from_bytes(stream.read(2), 'big')
+    group_name = stream.read(group_len).decode('utf-8')
+    return FileEntry(path, size, mtime_ns, mode, uid, gid, owner_name, group_name)
+
+
+def read_dir_entry(stream):
+    '''Read DirEntry from binary stream.'''
+    path_len = int.from_bytes(stream.read(2), 'big')
+    path = stream.read(path_len).decode('utf-8')
+    mtime_ns = int.from_bytes(stream.read(8), 'big', signed=True)
+    mode = int.from_bytes(stream.read(4), 'big')
+    uid = int.from_bytes(stream.read(4), 'big')
+    gid = int.from_bytes(stream.read(4), 'big')
+    owner_len = int.from_bytes(stream.read(2), 'big')
+    owner_name = stream.read(owner_len).decode('utf-8')
+    group_len = int.from_bytes(stream.read(2), 'big')
+    group_name = stream.read(group_len).decode('utf-8')
+    return DirEntry(path, mtime_ns, mode, uid, gid, owner_name, group_name)
+
+
+def read_symlink_entry(stream):
+    '''Read SymlinkEntry from binary stream.'''
+    path_len = int.from_bytes(stream.read(2), 'big')
+    path = stream.read(path_len).decode('utf-8')
+    target_len = int.from_bytes(stream.read(2), 'big')
+    target = stream.read(target_len).decode('utf-8')
+    mtime_ns = int.from_bytes(stream.read(8), 'big', signed=True)
+    uid = int.from_bytes(stream.read(4), 'big')
+    gid = int.from_bytes(stream.read(4), 'big')
+    return SymlinkEntry(path, target, mtime_ns, uid, gid)
+
+
 def main():
     parser = ArgumentParser()
     parser.add_argument('-v', '--verbose', action='store_true')
@@ -136,9 +363,12 @@ def main():
     p_checksum.add_argument('--progress', action='store_true', help='show progress info')
     p_checksum.add_argument('--start', type=int, metavar='OFFSET', default=0)
     p_checksum.add_argument('--end', type=int, metavar='OFFSET', default=None)
+    p_checksum.add_argument('-r', '--recursive', action='store_true', help='recursively process directories')
 
     p_retrieve.add_argument('source_file')
     p_retrieve.add_argument('--lzma', action='store_true', help='use lzma compression')
+    p_retrieve.add_argument('-r', '--recursive', action='store_true', help='recursively process directories')
+    p_retrieve.add_argument('--delete', action='store_true', help='delete files on destination that do not exist on source')
 
     p_save.add_argument('destination_file')
     p_save.add_argument('--truncate', action='store_true', help='truncate the destination file to the size of the source file')
@@ -147,6 +377,7 @@ def main():
     p_save.add_argument('--owner', '-o', action='store_true', help='preserve owner from source file')
     p_save.add_argument('--group', '-g', action='store_true', help='preserve group from source file')
     p_save.add_argument('--numeric-ids', action='store_true', help='use numeric uid/gid instead of looking up user/group names')
+    p_save.add_argument('-r', '--recursive', action='store_true', help='recursively process directories')
 
     args = parser.parse_args()
 
@@ -157,14 +388,26 @@ def main():
 
     try:
         if args.command == 'checksum':
-            do_checksum(args.destination_file, stdout.buffer, start_offset=args.start, end_offset=args.end, show_progress=args.progress)
+            if args.recursive:
+                do_checksum_recursive(args.destination_file, stdin.buffer, stdout.buffer, show_progress=args.progress)
+            else:
+                do_checksum(args.destination_file, stdout.buffer, start_offset=args.start, end_offset=args.end, show_progress=args.progress)
         elif args.command == 'retrieve':
-            do_retrieve(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma, verbose=args.verbose)
+            if args.recursive:
+                do_retrieve_recursive(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma, delete=args.delete, verbose=args.verbose)
+            else:
+                do_retrieve(args.source_file, stdin.buffer, stdout.buffer, use_lzma=args.lzma, verbose=args.verbose)
         elif args.command == 'save':
-            do_save(args.destination_file, stdin.buffer, truncate=args.truncate,
-                    preserve_times=args.times, preserve_perms=args.perms,
-                    preserve_owner=args.owner, preserve_group=args.group,
-                    numeric_ids=args.numeric_ids)
+            if args.recursive:
+                do_save_recursive(args.destination_file, stdin.buffer,
+                                  preserve_times=args.times, preserve_perms=args.perms,
+                                  preserve_owner=args.owner, preserve_group=args.group,
+                                  numeric_ids=args.numeric_ids)
+            else:
+                do_save(args.destination_file, stdin.buffer, truncate=args.truncate,
+                        preserve_times=args.times, preserve_perms=args.perms,
+                        preserve_owner=args.owner, preserve_group=args.group,
+                        numeric_ids=args.numeric_ids)
         else:
             raise Exception(f'Not implemented: {args.command}')
 
@@ -959,6 +1202,599 @@ def do_save(file_path, block_input_stream, truncate=False,
             utime(file_path, ns=(received_atime_ns, received_mtime_ns))
             new_stat = file_path.stat()
             logger.info('utime %s: atime_ns %d -> %d, mtime_ns %d -> %d', file_path, old_stat.st_atime_ns, new_stat.st_atime_ns, old_stat.st_mtime_ns, new_stat.st_mtime_ns)
+
+    except IncompleteReadError as exc:
+        exit(f'ERROR (save): {exc}')
+
+
+def do_checksum_recursive(dir_path, input_stream, output_stream, show_progress=False):
+    '''
+    Recursive checksum mode.
+
+    Scan destination directory and send file list with block hashes.
+    For each file, we send metadata followed by SHA3-512 hashes of each 128KB block.
+    This enables block-level diff on the retrieve side.
+    '''
+    if output_stream.isatty():
+        exit('ERROR (checksum): output_stream is a tty - will not write binary data to terminal')
+
+    dir_path = Path(dir_path).resolve()
+    if not dir_path.is_dir():
+        exit(f'ERROR (checksum): {dir_path} is not a directory')
+
+    # Scan destination directory
+    logger.debug('Scanning destination directory: %s', dir_path)
+    files, dirs, symlinks = scan_directory(dir_path)
+    logger.debug('Found %d files, %d dirs, %d symlinks', len(files), len(dirs), len(symlinks))
+
+    # Send file list header
+    total_entries = len(files) + len(dirs) + len(symlinks)
+    output_stream.write(b'list')
+    output_stream.write(total_entries.to_bytes(8, 'big'))
+
+    # Send files with block hashes
+    for entry in sorted(files, key=lambda e: e.path):
+        write_file_entry(output_stream, entry)
+
+        # Now send block hashes for this file
+        file_path = dir_path / entry.path
+        try:
+            with open(file_path, 'rb') as f:
+                block_pos = 0
+                while True:
+                    block_data = f.read(block_size)
+                    if not block_data:
+                        break
+                    block_hash = hash_factory(block_data).digest()
+                    output_stream.write(b'Hash')
+                    output_stream.write(block_pos.to_bytes(8, 'big'))
+                    output_stream.write(len(block_data).to_bytes(4, 'big'))
+                    output_stream.write(block_hash)
+                    block_pos += len(block_data)
+        except OSError as e:
+            logger.warning('Failed to read file %s for hashing: %s', file_path, e)
+
+        # End of file hashes
+        output_stream.write(b'fend')
+
+    # Send directories
+    for entry in sorted(dirs, key=lambda e: e.path):
+        write_dir_entry(output_stream, entry)
+
+    # Send symlinks
+    for entry in sorted(symlinks, key=lambda e: e.path):
+        write_symlink_entry(output_stream, entry)
+
+    # End of list and done
+    output_stream.write(b'ends')
+    output_stream.write(b'done')
+    output_stream.flush()
+
+
+def do_retrieve_recursive(dir_path, input_stream, output_stream, use_lzma=False, delete=False, verbose=False):
+    '''
+    Recursive retrieve mode with block-level diff.
+
+    1. Receive file list with block hashes from destination
+    2. Scan source directory
+    3. Compare block hashes and send only differing blocks
+    '''
+    if use_lzma:
+        from lzma import compress as lzma_compress
+
+    if output_stream.isatty():
+        exit('ERROR (retrieve): output_stream is a tty - will not write binary data to terminal')
+
+    dir_path = Path(dir_path).resolve()
+    if not dir_path.is_dir():
+        exit(f'ERROR (retrieve): {dir_path} is not a directory')
+
+    # Read destination file list with hashes
+    command = input_stream.read(4)
+    if command != b'list':
+        raise Exception(f'Expected list command, got {command!r}')
+
+    entry_count = int.from_bytes(input_stream.read(8), 'big')
+    logger.debug('Receiving %d entries from destination', entry_count)
+
+    # Store destination entries with their block hashes
+    # dst_files: path -> (FileEntry, [(pos, size, hash), ...])
+    dst_files = {}
+    dst_dirs = {}
+    dst_symlinks = {}
+
+    for _ in range(entry_count):
+        cmd = input_stream.read(4)
+        if cmd == b'file':
+            entry = read_file_entry(input_stream)
+            # Read block hashes until fend
+            block_hashes = []
+            while True:
+                hash_cmd = input_stream.read(4)
+                if hash_cmd == b'fend':
+                    break
+                elif hash_cmd == b'Hash':
+                    block_pos = int.from_bytes(input_stream.read(8), 'big')
+                    blk_size = int.from_bytes(input_stream.read(4), 'big')
+                    block_hash = input_stream.read(hash_digest_size)
+                    if len(block_hash) != hash_digest_size:
+                        raise IncompleteReadError('Incomplete block hash read')
+                    block_hashes.append((block_pos, blk_size, block_hash))
+                else:
+                    raise Exception(f'Expected Hash or fend, got {hash_cmd!r}')
+            dst_files[entry.path] = (entry, block_hashes)
+        elif cmd == b'dirs':
+            entry = read_dir_entry(input_stream)
+            dst_dirs[entry.path] = entry
+        elif cmd == b'link':
+            entry = read_symlink_entry(input_stream)
+            dst_symlinks[entry.path] = entry
+        else:
+            raise Exception(f'Unknown entry type: {cmd!r}')
+
+    # Read end marker and done
+    end_cmd = input_stream.read(4)
+    if end_cmd != b'ends':
+        raise Exception(f'Expected ends command, got {end_cmd!r}')
+
+    done_cmd = input_stream.read(4)
+    if done_cmd != b'done':
+        raise Exception(f'Expected done command, got {done_cmd!r}')
+
+    logger.debug('Received %d files, %d dirs, %d symlinks from destination',
+                 len(dst_files), len(dst_dirs), len(dst_symlinks))
+
+    # Scan source directory
+    src_files, src_dirs, src_symlinks = scan_directory(dir_path)
+    src_files_dict = {e.path: e for e in src_files}
+    src_dirs_dict = {e.path: e for e in src_dirs}
+    src_symlinks_dict = {e.path: e for e in src_symlinks}
+
+    logger.debug('Source has %d files, %d dirs, %d symlinks',
+                 len(src_files_dict), len(src_dirs_dict), len(src_symlinks_dict))
+
+    # Send directories to create (sorted by path to create parents first)
+    for path in sorted(src_dirs_dict.keys()):
+        if path not in dst_dirs:
+            entry = src_dirs_dict[path]
+            output_stream.write(b'mkdr')
+            path_bytes = path.encode('utf-8')
+            owner_bytes = entry.owner_name.encode('utf-8')
+            group_bytes = entry.group_name.encode('utf-8')
+            output_stream.write(len(path_bytes).to_bytes(2, 'big'))
+            output_stream.write(path_bytes)
+            output_stream.write(entry.mtime_ns.to_bytes(8, 'big', signed=True))
+            output_stream.write(entry.mode.to_bytes(4, 'big'))
+            output_stream.write(entry.uid.to_bytes(4, 'big'))
+            output_stream.write(entry.gid.to_bytes(4, 'big'))
+            output_stream.write(len(owner_bytes).to_bytes(2, 'big'))
+            output_stream.write(owner_bytes)
+            output_stream.write(len(group_bytes).to_bytes(2, 'big'))
+            output_stream.write(group_bytes)
+            logger.debug('Will create directory: %s', path)
+
+    # Send symlinks
+    for path, entry in sorted(src_symlinks_dict.items()):
+        dst_entry = dst_symlinks.get(path)
+        if dst_entry is None or dst_entry.target != entry.target:
+            output_stream.write(b'syml')
+            path_bytes = path.encode('utf-8')
+            target_bytes = entry.target.encode('utf-8')
+            output_stream.write(len(path_bytes).to_bytes(2, 'big'))
+            output_stream.write(path_bytes)
+            output_stream.write(len(target_bytes).to_bytes(2, 'big'))
+            output_stream.write(target_bytes)
+            output_stream.write(entry.mtime_ns.to_bytes(8, 'big', signed=True))
+            output_stream.write(entry.uid.to_bytes(4, 'big'))
+            output_stream.write(entry.gid.to_bytes(4, 'big'))
+            logger.debug('Will create/update symlink: %s -> %s', path, entry.target)
+
+    output_stream.flush()
+
+    # Process files with block-level diff
+    for path, src_entry in sorted(src_files_dict.items()):
+        dst_data = dst_files.get(path)
+        file_path = dir_path / path
+
+        if dst_data is None:
+            # New file - send everything
+            logger.debug('File %s: new file, sending all blocks', path)
+            dst_hashes = {}
+        else:
+            dst_entry, block_hashes = dst_data
+            # Build hash lookup: position -> (size, hash)
+            dst_hashes = {pos: (size, h) for pos, size, h in block_hashes}
+
+        # Signal start of file
+        output_stream.write(b'FILE')
+        path_bytes = path.encode('utf-8')
+        output_stream.write(len(path_bytes).to_bytes(2, 'big'))
+        output_stream.write(path_bytes)
+
+        blocks_sent = 0
+        blocks_skipped = 0
+
+        # Read source file and compare block by block
+        with open(file_path, 'rb') as f:
+            block_pos = 0
+            while True:
+                block_data = f.read(block_size)
+                if not block_data:
+                    break
+
+                # Check if this block matches destination
+                dst_block = dst_hashes.get(block_pos)
+                if dst_block is not None:
+                    dst_blk_size, dst_hash = dst_block
+                    if dst_blk_size == len(block_data):
+                        src_hash = hash_factory(block_data).digest()
+                        if src_hash == dst_hash:
+                            # Block matches, skip it
+                            blocks_skipped += 1
+                            block_pos += len(block_data)
+                            continue
+
+                # Block differs or is new - send it
+                blocks_sent += 1
+                if use_lzma:
+                    compressed = lzma_compress(block_data)
+                    if len(compressed) < len(block_data):
+                        output_stream.write(b'dlzm')
+                        output_stream.write(block_pos.to_bytes(8, 'big'))
+                        output_stream.write(len(compressed).to_bytes(4, 'big'))
+                        output_stream.write(compressed)
+                    else:
+                        output_stream.write(b'data')
+                        output_stream.write(block_pos.to_bytes(8, 'big'))
+                        output_stream.write(len(block_data).to_bytes(4, 'big'))
+                        output_stream.write(block_data)
+                else:
+                    output_stream.write(b'data')
+                    output_stream.write(block_pos.to_bytes(8, 'big'))
+                    output_stream.write(len(block_data).to_bytes(4, 'big'))
+                    output_stream.write(block_data)
+
+                block_pos += len(block_data)
+
+        logger.debug('File %s: sent %d blocks, skipped %d blocks', path, blocks_sent, blocks_skipped)
+
+        # Send file end marker
+        output_stream.write(b'fend')
+
+        # Send metadata for this file
+        stat_result = file_path.stat()
+        atime_ns = stat_result.st_atime_ns
+        mtime_ns = stat_result.st_mtime_ns
+        mode = stat_result.st_mode
+        uid = stat_result.st_uid
+        gid = stat_result.st_gid
+        owner_name = get_user_name_by_uid(uid)
+        group_name = get_group_name_by_gid(gid)
+
+        with open(file_path, 'rb') as f:
+            total_size = f.seek(0, SEEK_END)
+
+        owner_bytes = owner_name.encode('utf-8')
+        group_bytes = group_name.encode('utf-8')
+
+        output_stream.write(b'meta')
+        output_stream.write(atime_ns.to_bytes(8, 'big', signed=True))
+        output_stream.write(mtime_ns.to_bytes(8, 'big', signed=True))
+        output_stream.write(mode.to_bytes(4, 'big'))
+        output_stream.write(uid.to_bytes(4, 'big'))
+        output_stream.write(gid.to_bytes(4, 'big'))
+        output_stream.write(len(owner_bytes).to_bytes(2, 'big'))
+        output_stream.write(owner_bytes)
+        output_stream.write(len(group_bytes).to_bytes(2, 'big'))
+        output_stream.write(group_bytes)
+        output_stream.write(total_size.to_bytes(8, 'big'))
+        output_stream.write(b'end')
+
+        output_stream.flush()
+
+    # Handle deletions if --delete flag is set
+    if delete:
+        # Delete files that exist on destination but not on source
+        for path in sorted(dst_files.keys(), reverse=True):
+            if path not in src_files_dict:
+                output_stream.write(b'dele')
+                path_bytes = path.encode('utf-8')
+                output_stream.write(len(path_bytes).to_bytes(2, 'big'))
+                output_stream.write(path_bytes)
+                output_stream.write(ENTRY_FILE.to_bytes(1, 'big'))
+                logger.debug('Will delete file: %s', path)
+
+        # Delete symlinks
+        for path in sorted(dst_symlinks.keys(), reverse=True):
+            if path not in src_symlinks_dict:
+                output_stream.write(b'dele')
+                path_bytes = path.encode('utf-8')
+                output_stream.write(len(path_bytes).to_bytes(2, 'big'))
+                output_stream.write(path_bytes)
+                output_stream.write(ENTRY_SYMLINK.to_bytes(1, 'big'))
+                logger.debug('Will delete symlink: %s', path)
+
+        # Delete directories (reverse sorted to delete children first)
+        for path in sorted(dst_dirs.keys(), reverse=True):
+            if path not in src_dirs_dict:
+                output_stream.write(b'dele')
+                path_bytes = path.encode('utf-8')
+                output_stream.write(len(path_bytes).to_bytes(2, 'big'))
+                output_stream.write(path_bytes)
+                output_stream.write(ENTRY_DIR.to_bytes(1, 'big'))
+                logger.debug('Will delete directory: %s', path)
+
+    # Final done
+    output_stream.write(b'DONE')
+    output_stream.flush()
+
+
+def do_save_recursive(dir_path, input_stream,
+                      preserve_times=False, preserve_perms=False,
+                      preserve_owner=False, preserve_group=False,
+                      numeric_ids=False):
+    '''
+    Recursive save mode.
+
+    Receives commands from retrieve and applies them to destination directory.
+    '''
+    lzma_decompress = None
+
+    dir_path = Path(dir_path).resolve()
+    if not dir_path.is_dir():
+        exit(f'ERROR (save): {dir_path} is not a directory')
+
+    # Track files that need metadata applied at the end
+    files_metadata = []
+    dirs_metadata = []
+
+    try:
+        while True:
+            command = input_stream.read(4)
+            if not command:
+                raise IncompleteReadError('Stream closed unexpectedly')
+            if len(command) != 4:
+                raise IncompleteReadError('Incomplete command read')
+
+            if command == b'DONE':
+                # All done
+                break
+
+            elif command == b'mkdr':
+                # Create directory
+                path_len = int.from_bytes(input_stream.read(2), 'big')
+                rel_path = input_stream.read(path_len).decode('utf-8')
+                mtime_ns = int.from_bytes(input_stream.read(8), 'big', signed=True)
+                mode = int.from_bytes(input_stream.read(4), 'big')
+                uid = int.from_bytes(input_stream.read(4), 'big')
+                gid = int.from_bytes(input_stream.read(4), 'big')
+                owner_len = int.from_bytes(input_stream.read(2), 'big')
+                owner_name = input_stream.read(owner_len).decode('utf-8')
+                group_len = int.from_bytes(input_stream.read(2), 'big')
+                group_name = input_stream.read(group_len).decode('utf-8')
+
+                full_path = dir_path / rel_path
+                full_path.mkdir(parents=True, exist_ok=True)
+                logger.debug('Created directory: %s', full_path)
+
+                # Store for later metadata application
+                dirs_metadata.append((full_path, mtime_ns, mode, uid, gid, owner_name, group_name))
+
+            elif command == b'syml':
+                # Create symlink
+                path_len = int.from_bytes(input_stream.read(2), 'big')
+                rel_path = input_stream.read(path_len).decode('utf-8')
+                target_len = int.from_bytes(input_stream.read(2), 'big')
+                target = input_stream.read(target_len).decode('utf-8')
+                mtime_ns = int.from_bytes(input_stream.read(8), 'big', signed=True)
+                uid = int.from_bytes(input_stream.read(4), 'big')
+                gid = int.from_bytes(input_stream.read(4), 'big')
+
+                full_path = dir_path / rel_path
+
+                # Remove existing file/symlink if exists
+                if full_path.exists() or full_path.is_symlink():
+                    full_path.unlink()
+
+                # Create parent directory if needed
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+
+                symlink(target, full_path)
+                logger.debug('Created symlink: %s -> %s', full_path, target)
+
+                # Apply ownership if requested (can't apply mode/time to symlinks portably)
+                if preserve_owner or preserve_group:
+                    try:
+                        uid_to_set = uid if preserve_owner else -1
+                        gid_to_set = gid if preserve_group else -1
+                        chown(full_path, uid_to_set, gid_to_set, follow_symlinks=False)
+                    except (PermissionError, OSError) as e:
+                        logger.warning('Failed to chown symlink %s: %s', full_path, e)
+
+            elif command == b'FILE':
+                # Start of file data
+                path_len = int.from_bytes(input_stream.read(2), 'big')
+                rel_path = input_stream.read(path_len).decode('utf-8')
+
+                full_path = dir_path / rel_path
+                logger.debug('Receiving file: %s', full_path)
+
+                # Create parent directory if needed
+                full_path.parent.mkdir(parents=True, exist_ok=True)
+
+                # Open file for writing (create if doesn't exist)
+                if full_path.exists():
+                    f = open(full_path, 'r+b')
+                else:
+                    f = open(full_path, 'wb')
+
+                received_total_size = None
+
+                try:
+                    while True:
+                        file_cmd = input_stream.read(4)
+                        if not file_cmd or len(file_cmd) != 4:
+                            raise IncompleteReadError('Incomplete file command')
+
+                        if file_cmd in (b'data', b'dlzm'):
+                            block_pos = int.from_bytes(input_stream.read(8), 'big')
+                            blk_size = int.from_bytes(input_stream.read(4), 'big')
+                            block_data = input_stream.read(blk_size)
+                            if len(block_data) != blk_size:
+                                raise IncompleteReadError('Incomplete block data')
+
+                            if file_cmd == b'dlzm':
+                                if lzma_decompress is None:
+                                    from lzma import decompress as lzma_decompress
+                                block_data = lzma_decompress(block_data)
+
+                            f.seek(block_pos)
+                            f.write(block_data)
+
+                        elif file_cmd == b'fend':
+                            # File data ended, metadata follows
+                            break
+
+                        else:
+                            raise Exception(f'Unexpected command in file stream: {file_cmd!r}')
+
+                    # Read metadata
+                    meta_cmd = input_stream.read(4)
+                    if meta_cmd != b'meta':
+                        raise Exception(f'Expected meta command, got {meta_cmd!r}')
+
+                    meta_data = input_stream.read(28)
+                    atime_ns = int.from_bytes(meta_data[0:8], 'big', signed=True)
+                    mtime_ns = int.from_bytes(meta_data[8:16], 'big', signed=True)
+                    mode = int.from_bytes(meta_data[16:20], 'big')
+                    uid = int.from_bytes(meta_data[20:24], 'big')
+                    gid = int.from_bytes(meta_data[24:28], 'big')
+
+                    owner_len = int.from_bytes(input_stream.read(2), 'big')
+                    owner_name = input_stream.read(owner_len).decode('utf-8')
+                    group_len = int.from_bytes(input_stream.read(2), 'big')
+                    group_name = input_stream.read(group_len).decode('utf-8')
+
+                    total_size = int.from_bytes(input_stream.read(8), 'big')
+                    end_marker = input_stream.read(3)
+                    if end_marker != b'end':
+                        raise IncompleteReadError(f'Expected end marker, got {end_marker!r}')
+
+                    received_total_size = total_size
+
+                finally:
+                    if received_total_size is not None:
+                        f.truncate(received_total_size)
+                    f.close()
+
+                # Store metadata for later application
+                files_metadata.append((full_path, atime_ns, mtime_ns, mode, uid, gid, owner_name, group_name))
+
+            elif command == b'dele':
+                # Delete file/directory
+                path_len = int.from_bytes(input_stream.read(2), 'big')
+                rel_path = input_stream.read(path_len).decode('utf-8')
+                entry_type = int.from_bytes(input_stream.read(1), 'big')
+
+                full_path = dir_path / rel_path
+
+                if entry_type == ENTRY_FILE:
+                    if full_path.is_file():
+                        os_remove(full_path)
+                        logger.debug('Deleted file: %s', full_path)
+                elif entry_type == ENTRY_SYMLINK:
+                    if full_path.is_symlink():
+                        full_path.unlink()
+                        logger.debug('Deleted symlink: %s', full_path)
+                elif entry_type == ENTRY_DIR:
+                    if full_path.is_dir():
+                        rmtree(full_path)
+                        logger.debug('Deleted directory: %s', full_path)
+
+            else:
+                raise Exception(f'Unknown command: {command!r}')
+
+        # Apply metadata to files
+        for full_path, atime_ns, mtime_ns, mode, uid, gid, owner_name, group_name in files_metadata:
+            if preserve_perms:
+                try:
+                    chmod(full_path, mode)
+                except (PermissionError, OSError) as e:
+                    logger.warning('Failed to chmod %s: %s', full_path, e)
+
+            if preserve_owner or preserve_group:
+                uid_to_set = -1
+                gid_to_set = -1
+
+                if preserve_owner:
+                    if numeric_ids or not owner_name:
+                        uid_to_set = uid
+                    else:
+                        try:
+                            uid_to_set = getpwnam(owner_name).pw_uid
+                        except KeyError:
+                            uid_to_set = uid
+
+                if preserve_group:
+                    if numeric_ids or not group_name:
+                        gid_to_set = gid
+                    else:
+                        try:
+                            gid_to_set = getgrnam(group_name).gr_gid
+                        except KeyError:
+                            gid_to_set = gid
+
+                try:
+                    chown(full_path, uid_to_set, gid_to_set)
+                except (PermissionError, OSError) as e:
+                    logger.warning('Failed to chown %s: %s', full_path, e)
+
+            if preserve_times:
+                try:
+                    utime(full_path, ns=(atime_ns, mtime_ns))
+                except (PermissionError, OSError) as e:
+                    logger.warning('Failed to utime %s: %s', full_path, e)
+
+        # Apply metadata to directories (in reverse order to handle nested dirs)
+        for full_path, mtime_ns, mode, uid, gid, owner_name, group_name in reversed(dirs_metadata):
+            if preserve_perms:
+                try:
+                    chmod(full_path, mode)
+                except (PermissionError, OSError) as e:
+                    logger.warning('Failed to chmod %s: %s', full_path, e)
+
+            if preserve_owner or preserve_group:
+                uid_to_set = -1
+                gid_to_set = -1
+
+                if preserve_owner:
+                    if numeric_ids or not owner_name:
+                        uid_to_set = uid
+                    else:
+                        try:
+                            uid_to_set = getpwnam(owner_name).pw_uid
+                        except KeyError:
+                            uid_to_set = uid
+
+                if preserve_group:
+                    if numeric_ids or not group_name:
+                        gid_to_set = gid
+                    else:
+                        try:
+                            gid_to_set = getgrnam(group_name).gr_gid
+                        except KeyError:
+                            gid_to_set = gid
+
+                try:
+                    chown(full_path, uid_to_set, gid_to_set)
+                except (PermissionError, OSError) as e:
+                    logger.warning('Failed to chown %s: %s', full_path, e)
+
+            if preserve_times:
+                try:
+                    utime(full_path, ns=(mtime_ns, mtime_ns))
+                except (PermissionError, OSError) as e:
+                    logger.warning('Failed to utime %s: %s', full_path, e)
 
     except IncompleteReadError as exc:
         exit(f'ERROR (save): {exc}')
